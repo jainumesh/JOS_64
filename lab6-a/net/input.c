@@ -15,7 +15,7 @@ input(envid_t ns_envid)
     // Hint: When you IPC a page to the network server, it will be
     // reading from it for a while, so don't immediately receive
     // another packet in to the same physical page.
-#if 0
+
 	int length = 0;
 	int type = NSREQ_INPUT;
 	int result = 0;
@@ -48,21 +48,5 @@ input(envid_t ns_envid)
 		//If allocating new page each time		
         sys_page_unmap(0, &nsipcbuf.pkt.jp_data);
 	}
-#else
-	char buf[2048];
-	int perm = PTE_U | PTE_P | PTE_W; //This is needed for page allocation from kern to user environment. (Remember no transfer can happen (that is sys_page_map)
-	int len = 2047; // Buffer length
-	int r = 0;
-	while (1) {
-		while ((r = sys_net_rx(&buf)) < 0) {
-			sys_yield(); //This was neat.
-		}
-		len = r;
-		// Get the page received from the PCI. (Don't use sys_page_map..use alloc)
-		while ((r = sys_page_alloc(0, &nsipcbuf, perm)) < 0);
-		nsipcbuf.pkt.jp_len = len;
-		memmove(nsipcbuf.pkt.jp_data, buf, len);
-		while ((r = sys_ipc_try_send(ns_envid, NSREQ_INPUT, &nsipcbuf, perm)) < 0);
-	}
-#endif
+
 }
