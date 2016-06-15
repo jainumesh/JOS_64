@@ -16,7 +16,7 @@ output(envid_t ns_envid)
     // LAB 6: Your code here:
     // 	- read a packet from the network server
     //	- send the packet to the device driver
-#if 0
+
 	void* buf = NULL;
 	size_t len = 0;
 	//struct jif_pkt *sendReq;
@@ -59,17 +59,7 @@ output(envid_t ns_envid)
 		if(debug)
 			cprintf("Net Output: Sent packet to kernel %d to %x\n", r, whom);
 		sys_page_unmap(0, sendReq);
-#else
-	int r = 0;
-	while (1) {
-		r = sys_ipc_recv(&nsipcbuf);
-		// check if the request is for transmitting by checking the envid and value. (this process is forked from testoutput
-		if ((thisenv->env_ipc_from != ns_envid) ||(thisenv->env_ipc_value != NSREQ_OUTPUT)) {
-			continue;
-		}
-		while ((r = sys_net_tx(nsipcbuf.pkt.jp_data, nsipcbuf.pkt.jp_len)) < 0);		
-		//cprintf("buffer %s len %d\n", nsipcbuf.pkt.jp_data, nsipcbuf.pkt.jp_len);
-#endif		
+		
     }
 }
 
