@@ -1,0 +1,2504 @@
+diff --cc fs/bc.c
+index c960195,e121251..0000000
+mode 100644,100644..100755
+--- a/fs/bc.c
++++ b/fs/bc.c
+@@@ -29,33 -29,46 +29,51 @@@ va_is_dirty(void *va
+  // Hint: Use ide_read and BLKSECTS.
+  static void
+  bc_pgfault(struct UTrapframe *utf)
+ +{
+ +	void *addr = (void *) utf->utf_fault_va;
+ +	uint64_t blockno = ((uint64_t)addr - DISKMAP) / BLKSIZE;
+ +	int r;
+ +
+ +	// Check that the fault was within the block cache region
+ +	if (addr < (void*)DISKMAP || addr >= (void*)(DISKMAP + DISKSIZE))
+ +		panic("page fault in FS: eip %08x, va %08x, err %04x",
+- 		      utf->utf_rip, addr, utf->utf_err);
+++			  utf->utf_rip, addr, utf->utf_err);
+ +
+ +	// Sanity check the block number.
+ +	if (super && blockno >= super->s_nblocks)
+ +		panic("reading non-existent block %08x\n", blockno);
+ +
+ +	// Allocate a page in the disk map region, read the contents
+ +	// of the block from the disk into that page.
+ +	// Hint: first round addr to page boundary.
+ +	//
+ +	// LAB 5: your code here:
+++	addr = ROUNDDOWN(addr, PGSIZE);
+++	if(0 != sys_page_alloc(0, (void*)addr, PTE_SYSCALL)){
+++		panic("Page Allocation Failed during handling page fault in FS");
+++	}
+++#ifdef VMM_GUEST
+++	if(0 != host_read((uint32_t) (blockno * BLKSECTS), (void*)addr, BLKSECTS))
++ 	{
+ -		void *addr = (void *) utf->utf_fault_va;
+ -		uint64_t blockno = ((uint64_t)addr - DISKMAP) / BLKSIZE;
+ -		int r;
+ -	
+ -		// Check that the fault was within the block cache region
+ -		if (addr < (void*)DISKMAP || addr >= (void*)(DISKMAP + DISKSIZE))
+ -			panic("page fault in FS: eip %08x, va %08x, err %04x",
+ -				  utf->utf_rip, addr, utf->utf_err);
+ -	
+ -		// Sanity check the block number.
+ -		if (super && blockno >= super->s_nblocks)
+ -			panic("reading non-existent block %08x\n", blockno);
+ -	
+ -		// Allocate a page in the disk map region, read the contents
+ -		// of the block from the disk into that page.
+ -		// Hint: first round addr to page boundary.
+ -		//
+ -		// LAB 5: your code here:
+ -		addr = ROUNDDOWN(addr, PGSIZE);
+ -		if(0 != sys_page_alloc(0, (void*)addr, PTE_SYSCALL)){
+ -			panic("Page Allocation Failed during handling page fault in FS");
+ -		}
+ -		
+ -		if(0 != ide_read((uint32_t) (blockno * BLKSECTS), (void*)addr, BLKSECTS))
+ -		{
+ -			panic("ide read failed in Page Fault Handling");		
+ -		}
+ -	
+ -		if ((r = sys_page_map(0, addr, 0, addr, uvpt[PGNUM(addr)] & PTE_SYSCALL)) < 0)
+ -			panic("in bc_pgfault, sys_page_map: %e", r);
+ -	
+ -		// Check that the block we read was allocated. (exercise for
+ -		// the reader: why do we do this *after* reading the block
+ -		// in?)
+ -		if (bitmap && block_is_free(blockno))
+ -			panic("reading free block %08x\n", blockno);
+++		panic("ide read failed in Page Fault Handling");		
+++	}
+++#else
+++	if(0 != ide_read((uint32_t) (blockno * BLKSECTS), (void*)addr, BLKSECTS))
+++	{
+++		panic("ide read failed in Page Fault Handling");		
++ 	}
+++#endif	
+++	if ((r = sys_page_map(0, addr, 0, addr, uvpt[PGNUM(addr)] & PTE_SYSCALL)) < 0)
+++		panic("in bc_pgfault, sys_page_map: %e", r);
+ +
+ +	// Check that the block we read was allocated. (exercise for
+ +	// the reader: why do we do this *after* reading the block
+ +	// in?)
+ +	if (bitmap && block_is_free(blockno))
+ +		panic("reading free block %08x\n", blockno);
+ +}
+  
++ 
+  // Flush the contents of the block containing VA out to disk if
+  // necessary, then clear the PTE_D bit using sys_page_map.
+  // If the block is not in the block cache or is not dirty, does
+@@@ -65,15 -78,31 +83,37 @@@
+  // Hint: Don't forget to round addr down.
+  void
+  flush_block(void *addr)
+- {
+- 	uint64_t blockno = ((uint64_t)addr - DISKMAP) / BLKSIZE;
++ 	{
++ 		uint64_t blockno = ((uint64_t)addr - DISKMAP) / BLKSIZE;
++ 		int r;
++ 		
++ 		if (addr < (void*)DISKMAP || addr >= (void*)(DISKMAP + DISKSIZE))
++ 			panic("flush_block of bad va %08x", addr);
++ 	
++ 		// LAB 5: Your code here.
++ 		//panic("flush_block not implemented");
++ 		if(va_is_mapped(addr) == false || va_is_dirty(addr) == false)
++ 		{
++ 			return;
++ 		}
++ 		addr = ROUNDDOWN(addr, PGSIZE);
+++#ifdef VMM_GUEST
+++		if(0 != host_write((uint32_t) (blockno * BLKSECTS), (void*)addr, BLKSECTS))
+++		{
+++			panic("ide read failed in Page Fault Handling");		
+++		}
+++#else
++ 		if(0 != ide_write((uint32_t) (blockno * BLKSECTS), (void*)addr, BLKSECTS))
++ 		{
++ 			panic("ide write failed in Flush Block");	
++ 		}
+ -	
+++#endif	
++ 		if ((r = sys_page_map(0, addr, 0, addr, PTE_SYSCALL)) < 0)
++ 		{
++ 			panic("in flush_block, sys_page_map: %e", r);
++ 		}
++ 	}
+  
+- 	if (addr < (void*)DISKMAP || addr >= (void*)(DISKMAP + DISKSIZE))
+- 		panic("flush_block of bad va %08x", addr);
+- 
+- 	// LAB 5: Your code here.
+- 	panic("flush_block not implemented");
+- }
+  
+  // Test that the block cache works, by smashing the superblock and
+  // reading it back.
+diff --cc kern/env.c
+index 4c909a2,5b26055..0000000
+mode 100644,100644..100755
+--- a/kern/env.c
++++ b/kern/env.c
+@@@ -486,6 -447,19 +570,19 @@@ env_create(uint8_t *binary, enum EnvTyp
+  
+  	// If this is the file server (type == ENV_TYPE_FS) give it I/O privileges.
+  	// LAB 5: Your code here.
++ 
++ 	struct Env *e;
++ 	envid_t parent_id;
++ 	if(env_alloc(&e, 0) != 0)
++ 	{
++ 		panic("Failed in env_alloc");
++ 	}
++ 	e->env_type = type;
++ 	if(type == ENV_TYPE_FS)
++ 	{
+ -			e->env_tf.tf_eflags |= FL_IOPL_MASK;
+++		e->env_tf.tf_eflags |= FL_IOPL_MASK;
++ 	}
++ 	load_icode(e, binary);
+  }
+  
+  //
+@@@ -639,7 -608,34 +737,44 @@@ env_run(struct Env *e
+  	//	e->env_tf to sensible values.
+  
+  	// LAB 3: Your code here.
++ 	//cprintf("ENV_RUN being called from here: e->env_id [%d]",e->env_id); 
++ 	if(curenv == e){
++ 		curenv->env_runs += 1;
++ 		unlock_kernel();
++ 		env_pop_tf(&curenv->env_tf);
++ 	}
++ 	if(curenv) //If this is a context switch
++ 	{
++ 		if(curenv->env_status == ENV_RUNNING)
++ 		{
++ 			curenv->env_status = ENV_RUNNABLE;	
++ 		}
++ 	}
++ 	//make new enviornment as current enviornment
++ 	
++ 	curenv = e;
++ 	curenv->env_status = ENV_RUNNING;
++ 	curenv->env_runs += 1;
++ 	unlock_kernel();
++ 	lcr3(curenv->env_cr3);
++ 	//restore the environment's registers
++ 	//if(curenv->env_runs > 0)
++ 	{
++ 		env_pop_tf(&curenv->env_tf);
++ 	}
++ 	/*Below line should never get printed*/
++ 	//cprintf("%x %p %x %p \n", PML4(UVPT), PML4(UVPT), KADDR(PML4(UVPT)), KADDR(PML4(UVPT)));
+  
+- 	panic("env_run not yet implemented");
++ 	//panic("env_run not yet implemented");
++ }
+++envid_t
+++ipc_find_env(enum EnvType type)
+++{
+++	int i;
+++	for (i = 0; i < NENV; i++) {
+++		if (envs[i].env_type == type)
+++			return envs[i].env_id;
+++	}
+++	return 0;
+ +}
+  
+diff --cc kern/init.c
+index bfe5747,84fac27..0000000
+--- a/kern/init.c
++++ b/kern/init.c
+@@@ -27,22 -24,22 +29,37 @@@ uint64_t end_debug
+  
+  static void boot_aps(void);
+  
+ +extern unsigned char mpentry_start[], mpentry_end[];
+ +
+ +#ifdef VMM_GUEST
+ +
+ +static void boot_virtual_aps(void);
+ +
+ +int64_t vmcall(int num, int check, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5)
+ +{
+ +    int64_t ret;
+ +    asm volatile("vmcall\n" : "=a" (ret) : "a" (num), "d" (a1), "c" (a2), "b" (a3), "D" (a4), "S" (a5) : "cc", "memory");
+ +    if(check && ret > 0) panic("vmcall %d returned %d (> 0)", num, ret);
+ +    return ret;
+ +}
+ +#endif
+ +
+  
++ 
++ 
++ // Test the stack backtrace function (lab 1 only)
++ void
++ test_backtrace(int x)
++ {
++ 	cprintf("entering test_backtrace %d\n", x);
++ 	if (x > 0)
++ 		test_backtrace(x-1);
++ 	else
++ 		mon_backtrace(0, 0, 0);
++ 	cprintf("leaving test_backtrace %d\n", x);
++ }
++ 
++ 
+  void
+  i386_init(void)
+  {
+@@@ -94,42 -75,42 +111,56 @@@
+  	// Lab 4 multitasking initialization functions
+  	pic_init();
+  
+ +	// Lab 6 hardware initialization functions
+ +	time_init();
+ +	pci_init();
+ +
+  	// Acquire the big kernel lock before waking up APs
+  	// Your code here:
+--
+ -	//Starting non-boot CPUs
++ 	lock_kernel();
+ +#ifndef VMM_GUEST
+ +	// Starting non-boot CPUs
+  	boot_aps();
+- 
+ +#endif
+ +
+ +
+  
+- 
+++#ifndef VMM_GUEST
+  	// Start fs.
+  	ENV_CREATE(fs_fs, ENV_TYPE_FS);
+++#else
+++	ENV_CREATE(user_hello, ENV_TYPE_USER);
+++#endif
+  
+  #if defined(TEST)
+  	// Don't touch -- used by grading script!
+  	ENV_CREATE(TEST, ENV_TYPE_USER);
+  #else
+  	// Touch all you want.
+ -	//ENV_CREATE(user_icode, ENV_TYPE_USER);
+ +#if defined(TEST_EPT_MAP)
+ +	test_ept_map();
+ +#endif
+ +
+- 	ENV_CREATE(user_icode, ENV_TYPE_USER);
+- #endif // TEST*
+++	//ENV_CREATE(user_vmm, ENV_TYPE_USER);
+  
+  	// Should not be necessary - drains keyboard because interrupt has given up.
+- 	kbd_intr();
++ 	//kbd_intr();
+ -
+ -	//ENV_CREATE(user_primes, ENV_TYPE_USER);
+++	//ENV_CREATE(user_hello, ENV_TYPE_USER);
++ 	//ENV_CREATE(user_testpteshare, ENV_TYPE_USER);
++ 	//ENV_CREATE(user_testfdsharing, ENV_TYPE_USER);
++ 	//ENV_CREATE(user_testbss, ENV_TYPE_USER);
++ 	//ENV_CREATE(user_spawnhello, ENV_TYPE_USER);
+ -	ENV_CREATE(user_icode, ENV_TYPE_USER);	
+++	//ENV_CREATE(user_icode, ENV_TYPE_USER);	
++ 	//ENV_CREATE(user_testshell, ENV_TYPE_USER);	
++ 	//ENV_CREATE(user_testfile, ENV_TYPE_USER);
++ 	//ENV_CREATE(user_primespipe, ENV_TYPE_USER);
++ 	//ENV_CREATE(user_testkbd, ENV_TYPE_USER);
+  
++ 
++ #endif // TEST*
+  	// Schedule and run the first user environment!
+  	sched_yield();
++ 
+  }
+  
+  // While boot_aps is booting a given CPU, it communicates the per-core
+@@@ -181,12 -162,12 +212,13 @@@ mp_main(void
+  	// only one CPU can enter the scheduler at a time!
+  	//
+  	// Your code here:
+- 
++ 	lock_kernel();
++ 	sched_yield();
+  	// Remove this after you finish Exercise 4
+- 	for (;;);
++ 	//for (;;);
+  }
+  
+ +
+  /*
+   * Variable panicstr contains argument to first call to panic; used as flag
+   * to indicate that the kernel has already called panic.
+diff --cc kern/pmap.c
+index dec1406,d17a2b9..0000000
+mode 100644,100644..100755
+--- a/kern/pmap.c
++++ b/kern/pmap.c
+diff --cc kern/sched.c
+index 869f628,977ad5b..0000000
+mode 100644,100644..100755
+--- a/kern/sched.c
++++ b/kern/sched.c
+@@@ -28,30 -10,47 +28,72 @@@ vmxon() 
+  // Choose a user environment to run and run it.
+  void
+  sched_yield(void)
+- {
+- 	struct Env *idle;
+- 	// Implement simple round-robin scheduling.
+- 	//
+- 	// Search through 'envs' for an ENV_RUNNABLE environment in
+- 	// circular fashion starting just after the env this CPU was
+- 	// last running.  Switch to the first such environment found.
+- 	//
+- 	// If no envs are runnable, but the environment previously
+- 	// running on this CPU is still ENV_RUNNING, it's okay to
+- 	// choose that environment.
+- 	//
+- 	// Never choose an environment that's currently running on
+- 	// another CPU (env_status == ENV_RUNNING). If there are
+- 	// no runnable environments, simply drop through to the code
+- 	// below to halt the cpu.
+- 
+- 	// LAB 4: Your code here.
+- 	// sched_halt never returns
+- 	sched_halt();
+- }
+- 
+ -	{
+ -		struct Env *idle;
+ -	
+++{	
++ 		// Implement simple round-robin scheduling.
++ 		//
++ 		// Search through 'envs' for an ENV_RUNNABLE environment in
++ 		// circular fashion starting just after the env this CPU was
++ 		// last running.  Switch to the first such environment found.
++ 		//
++ 		// If no envs are runnable, but the environment previously
++ 		// running on this CPU is still ENV_RUNNING, it's okay to
++ 		// choose that environment.
++ 		//
++ 		// Never choose an environment that's currently running on
++ 		// another CPU (env_status == ENV_RUNNING). If there are
++ 		// no runnable environments, simply drop through to the code
++ 		// below to halt the cpu.	
++ 	
++ 		// LAB 4: Your code here.
++ 		static uint32_t env_counter = 0;
++ 		uint32_t i = 0;
++ 		//cprintf("envcounter1 = [%d]\n",env_counter);
++ 		for(i=1;i<= NENV;i++){
++ 			if(envs[(env_counter+i)%NENV].env_status == ENV_RUNNABLE){
++ 				env_counter = (env_counter+i)%NENV;
++ 				//cprintf("going to run now = [%d],status is [%d]\n",env_counter,envs[env_counter].env_status);
+ -				env_run(&envs[env_counter]);
+++			#ifndef VMM_GUEST
+++				if(envs[env_counter].env_type==ENV_TYPE_GUEST)
+++				{
+++					if(curenv != NULL){
+++				    	if(curenv->env_status==ENV_RUNNING)
+++					    	curenv->env_status=ENV_RUNNABLE;
+++				    }
+++				    curenv = &envs[env_counter];
+++				    curenv->env_status = ENV_RUNNING;
+++				    curenv->env_runs++;
+++					if(!vmxon())
+++				    	vmx_vmrun(&envs[env_counter]);
+++				}
+++				else
+++			#endif					
+++				{
+++					env_run(&envs[env_counter]);
+++				}
++ 				break;
++ 			}
++ 		}
++ 		//cprintf("envcounter2 = [%d]\n",env_counter);
++ 		if(curenv && curenv->env_status == ENV_RUNNING){
+ -			env_run(curenv);
+ -			
+ -		}else{
+++		#ifndef VMM_GUEST
+++			if(curenv->env_type==ENV_TYPE_GUEST)
+++			{
+++				curenv->env_runs++;
+++				if(!vmxon())
+++					vmx_vmrun(curenv);
+++			}
+++			else
+++		#endif		
+++			{
+++				env_run(curenv);
+++			}
+++		}
+++		else{
++ 			sched_halt();	
++ 		}
++ 	}
+  
+  
+ -
+  // Halt this CPU when there is nothing to do. Wait until the
+  // timer interrupt wakes it up. This function never returns.
+  //
+diff --cc kern/syscall.c
+index 506d2ea,73e7721..0000000
+mode 100644,100644..100755
+--- a/kern/syscall.c
++++ b/kern/syscall.c
+@@@ -11,11 -12,6 +12,11 @@@
+  #include <kern/syscall.h>
+  #include <kern/console.h>
+  #include <kern/sched.h>
+ +#include <kern/time.h>
+- #ifndef VMM_GUEST
+++//#ifndef VMM_GUEST
+ +#include <vmm/ept.h>
+ +#include <vmm/vmx.h>
+- #endif
+++//#endif
+  
+  // Print a string to the system console.
+  // The string is exactly 'len' characters long.
+@@@ -257,9 -371,47 +376,69 @@@ sys_page_unmap(envid_t envid, void *va
+  static int
+  sys_ipc_try_send(envid_t envid, uint32_t value, void *srcva, unsigned perm)
+  {
+- 		// LAB 4: Your code here.
+- 		panic("sys_ipc_try_send not implemented");
++ 	// LAB 4: Your code here.
++ 	struct Env* dstenv;
++ 	struct Env* srcenv;
++ 	pte_t* pte_store;
+ -	int srcperm;
+++	int srcperm , result;
+++	struct PageInfo *pp = NULL;
++ 	perm|= PTE_P;
++ 	if(envid2env(envid, &dstenv,0) != 0)
++ 		return -E_BAD_ENV;
++ 
++ 	if(envid2env(0, &srcenv,0) != 0)
++ 		return -E_BAD_ENV;
++ 	
++ 	if(!dstenv->env_ipc_recving)
++ 		return -E_IPC_NOT_RECV;
+ -
+ -	if(!page_lookup(srcenv->env_pml4e,srcva,&pte_store))
+ -		if(srcva <(void*)UTOP)
+ -			return -E_INVAL;
+++//#ifndef VMM_GUEST
+++		pp =page_lookup(srcenv->env_pml4e,srcva,&pte_store); 
+++		if(!pp)
+++			if(srcva <(void*)UTOP)
+++				return -E_INVAL;
+++//#else
+++		;;//result = ept_lookup_gpa(srcenv->env_pml4e, srcva,0,&pte_store);
+++
+++//#endif
++ 	srcperm = *pte_store&PTE_SYSCALL;
++ 	if(srcva <(void*)UTOP)
++ 		if((((uint64_t)srcva)%PGSIZE!=0) || ((srcperm & (PTE_U | PTE_P))!=(PTE_U | PTE_P)))
++ 			return -E_INVAL;
++ 	if((srcva <(void*)UTOP) && ((perm & PTE_W) !=0) &&(((srcperm& PTE_W) == 0)))
++ 		return -E_INVAL;
++ 
++ 	if(envid == curenv->env_id)
++ 		panic("what the hell. how can this be????");
++ 
++ 	dstenv->env_ipc_recving = 0;
++ 	dstenv->env_ipc_from = srcenv->env_id;
++ 	dstenv->env_ipc_value = value;
++ 	//cprintf("dstenv -> envID is:[%d]\n",dstenv->env_id);
++ 	if(srcva <(void*)UTOP && dstenv->env_ipc_dstva <(void*)UTOP){
++ 		dstenv->env_ipc_perm = perm;
+ -		if(0< sys_page_map(srcenv->env_id,srcva,dstenv->env_id,dstenv->env_ipc_dstva,perm))
+ -			return -E_NO_MEM;
+++#ifndef VMM_GUEST
+++				// guest OS related changes : Lab7-ex7
+++				if ( curenv->env_type != ENV_TYPE_GUEST) {
+++#endif
+++					if(page_insert(dstenv->env_pml4e, pp, dstenv->env_ipc_dstva , perm) < 0) {
+++						cprintf("\n No memory to map the page to target env\n");
+++						return -E_NO_MEM;
+++					}
+++#ifndef VMM_GUEST
+++				}
+++				else {
+++					if (ept_page_insert(dstenv->env_pml4e, pp, dstenv->env_ipc_dstva, perm) <0) {
+++						cprintf("\n No memory to map the page to target env\n");
+++									return -E_NO_MEM;
+++								}
+++				}
+++#endif
+++
+  	}
++ 	dstenv->env_status = ENV_RUNNABLE;
++ 	return 0;
++ 	//panic("sys_ipc_try_send not implemented");
++ }
+  
+  // Block until a value is ready.  Record that you want to receive
+  // using the env_ipc_recving and env_ipc_dstva fields of struct Env,
+@@@ -271,94 -423,31 +450,170 @@@
+  // This function only returns on error, but the system call will eventually
+  // return 0 on success.
+  // Return < 0 on error.  Errors are:
+--//	-E_INVAL if dstva < UTOP but dstva is not page-aligned.
+++
+  static int
+  sys_ipc_recv(void *dstva)
+  {
+  	// LAB 4: Your code here.
+- 	panic("sys_ipc_recv not implemented");
++ 	struct Env* env;
+++	void *addr;
+++	addr = 0 ;
++ 	if(envid2env(0, &env,0) != 0)
++ 	{
++ 		return -E_BAD_ENV;
++ 	}
++ 	if(dstva <(void*)UTOP && (uint64_t)dstva%PGSIZE!=0)
++ 		return -E_INVAL;
++ 	if(dstva <(void*)UTOP)
++ 		env->env_ipc_dstva = dstva;
++ 
++ 	env->env_ipc_recving = 1;
+++#ifndef VMM_GUEST
+++	if (curenv->env_type == ENV_TYPE_GUEST) {
+++		ept_gpa2hva(curenv->env_pml4e,dstva,&addr);
+++		curenv->env_ipc_dstva = addr;
+++	}
+++	else
+++		curenv->env_ipc_dstva = dstva;	
+++#endif
++ 
++ 	env->env_status = ENV_NOT_RUNNABLE;
++ 	env->env_tf.tf_regs.reg_rax = 0;
++ 	sys_yield();
++ 	
++ 	//panic("sys_ipc_recv not implemented");
+  	return 0;
+  }
+  
+ +
+- // Return the current time.
+ +static int
+ +sys_time_msec(void)
+ +{
+ +	// LAB 6: Your code here.
+ +	panic("sys_time_msec not implemented");
+++	return time_msec();
+ +}
+ +
+ +
+ +// Maps a page from the evnironment corresponding to envid into the guest vm 
+ +// environments phys addr space. 
+ +//
+ +//
+ +// Return 0 on success, < 0 on error.  Errors are:
+ +//	-E_BAD_ENV if srcenvid and/or guest doesn't currently exist,
+- //		or the caller doesn't have permission to change one of them.
+++//		or the caller doesn't have permission to change one of them.(checlperm = 1)
+ +//	-E_INVAL if srcva >= UTOP or srcva is not page-aligned,
+ +//		or guest_pa >= guest physical size or guest_pa is not page-aligned.
+ +//	-E_INVAL is srcva is not mapped in srcenvid's address space.
+ +//	-E_INVAL if perm is inappropriate 
+ +//	-E_INVAL if (perm & PTE_W), but srcva is read-only in srcenvid's
+ +//		address space.
+ +//	-E_NO_MEM if there's no memory to allocate any necessary page tables. 
+ +//
+ +// Hint: The TA solution uses ept_map_hva2gpa().  A guest environment uses 
+ +//       env_pml4e to store the root of the extended page tables.
+ +// 
+ +#ifndef VMM_GUEST
+ +static void
+ +sys_vmx_list_vms() {
+ +	vmx_list_vms();
+ +}
+ +
+ +static bool
+ +sys_vmx_sel_resume(int i) {
+ +	return vmx_sel_resume(i);
+ +}
+ +
+ +static int
+ +sys_vmx_get_vmdisk_number() {
+ +	return vmx_get_vmdisk_number();
+ +}
+ +
+ +static void
+ +sys_vmx_incr_vmdisk_number() {
+ +	vmx_incr_vmdisk_number();
+ +}
+ +
+ +static int
+ +sys_ept_map(envid_t srcenvid, void *srcva,
+ +	    envid_t guest, void* guest_pa, int perm)
+ +{
+- 		/* Your code here */
+- 		panic ("sys_ept_map not implemented");
+- 		return 0;
+++	uint32_t  result =0;
+++	struct Env *env_store_src;
+++	struct Env *env_store_guest;
+++	struct PageInfo * pp;
+++	pte_t *pte_store;
+++	result = envid2env(srcenvid,&env_store_src,1);
+++		if(result != 0){
+++			cprintf("failed here 1\n");
+++			return -E_BAD_ENV;
+++			}
+++	
+++	result = envid2env(guest,&env_store_guest,1);
+++	if(result != 0){
+++		cprintf("failed here 2\n");
+++		return result;
+++	}
+++
+++
+++	if(((uint64_t)guest_pa%PGSIZE !=0 || (uint64_t)guest_pa >= (env_store_guest->env_vmxinfo.phys_sz)) 
+++			||((uint64_t)srcva%PGSIZE !=0 || (uint64_t)srcva>= UTOP) || (env_store_guest->env_type != ENV_TYPE_GUEST)){
+++		
+++		cprintf("failed here 3[%x] , env_type[%x]\n",srcva,guest_pa);
+++		return -E_INVAL;
+++	}
+++
+++	if((!(perm &__EPTE_FULL))||(!(perm &__EPTE_READ))) {
+++		
+++		cprintf("failed here 4\n");
+++		return -E_INVAL;
+++	}
+++		
+++	pp = page_lookup(env_store_src->env_pml4e, srcva, &pte_store);
+++	if(NULL == pp || (((*(pte_store) & PTE_W) == 0) && ((perm & PTE_W) != 0))){
+++		
+++		cprintf("failed here 5\n");
+++		return -E_INVAL;	
+++	}
+++
+++	result = ept_map_hva2gpa(env_store_guest->env_pml4e, page2kva(pp), guest_pa, perm, 0);
+++
+++
+++	//result = ept_page_insert(env_store_guest->env_pml4e, pp,guest_pa,perm);
+++	
+++	if(result != 0){
+++		
+++		cprintf("failed here 6\n");
+++		return result;
+++	}else{
+++		pp->pp_ref++;
+++	}
+++	/* Your code here */
+++	//panic ("sys_ept_map not implemented");
+++	return 0;
+ +}
+ +
+ +static envid_t
+ +	sys_env_mkguest(uint64_t gphysz, uint64_t gRIP) {
+ +	int r;
+ +	struct Env *e;
+ +
+ +	// Check if the processor has VMX support.
+ +	if ( !vmx_check_support() ) {
+ +		return -E_NO_VMX;
+ +	} else if ( !vmx_check_ept() ) {
+ +		return -E_NO_EPT;
+ +	} 
+ +	if ((r = env_guest_alloc(&e, curenv->env_id)) < 0)
+ +		return r;
+ +	e->env_status = ENV_NOT_RUNNABLE;
+ +	e->env_vmxinfo.phys_sz = gphysz;
+ +	e->env_tf.tf_rip = gRIP;
+ +	return e->env_id;
+ +}
+ +#endif //!VMM_GUEST
+ +
+ +
+  // Dispatches to the correct kernel function, passing the arguments.
+  int64_t
+  syscall(uint64_t syscallno, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5)
+@@@ -367,36 -456,58 +622,84 @@@
+  	// Return any appropriate return value.
+  	// LAB 3: Your code here.
+  
+- 	panic("syscall not implemented");
++ 	//panic("syscall not implemented");
++ 	int64_t result = -E_NO_SYS;
+  
+ -	switch (syscallno) 
+ -	{
+ +	switch (syscallno) {
+ +#ifndef VMM_GUEST
+ +	case SYS_ept_map:
+ +		return sys_ept_map(a1, (void*) a2, a3, (void*) a4, a5);
+ +	case SYS_env_mkguest:
+ +		return sys_env_mkguest(a1, a2);
+ +	case SYS_vmx_list_vms:
+ +		sys_vmx_list_vms();
+ +		return 0;
+ +	case SYS_vmx_sel_resume:
+ +		return sys_vmx_sel_resume(a1);
+ +	case SYS_vmx_get_vmdisk_number:
+ +		return sys_vmx_get_vmdisk_number();
+ +	case SYS_vmx_incr_vmdisk_number:
+ +		sys_vmx_incr_vmdisk_number();
+ +		return 0;
+ +#endif
+ +		
+- 	default:
+- 		return -E_NO_SYS;
++ 		case SYS_cputs:
++ 			sys_cputs((const char *)a1, a2);
++ 			result = 0;
++ 			break;
++ 		case SYS_cgetc:
++ 			result = sys_cgetc();
++ 			break;
++ 		case SYS_getenvid:
++ 			result = sys_getenvid();
++ 			break;
++ 		case SYS_env_destroy:
++ 			result = sys_env_destroy(a1);
++ 			break;
++ 		case SYS_yield:
++ 			sys_yield();
++ 			result = 0;
++ 			break;
++ 		case SYS_exofork:
++ 			return sys_exofork();
++ 			break;
++ 		case SYS_env_set_status:
++ 			return sys_env_set_status(a1, a2);
++ 			break;
++ 		case SYS_env_set_pgfault_upcall:
++ 			return sys_env_set_pgfault_upcall(a1, (void*)a2);
++ 			break;
++ 		case SYS_ipc_try_send:
++ 			return sys_ipc_try_send(a1, a2, (void*)a3, a4);
++ 			break;
++ 		case SYS_ipc_recv:
++ 			return sys_ipc_recv((void*)a1);
++ 			break;
++ 		case SYS_page_alloc:
++ 			return sys_page_alloc(a1, (void*)a2, a3);
++ 			break;	
++ 		case SYS_page_map:
++ 			return sys_page_map(a1, (void*)a2, a3, (void*)a4, a5);
++ 			break;
++ 		case SYS_page_unmap:
++ 			return sys_page_unmap(a1, (void*)a2);
++ 			break;
++ 		case SYS_env_set_trapframe:
++ 			return sys_env_set_trapframe(a1, (struct Trapframe *)a2);
+++		case SYS_time_msec:
+++			return sys_time_msec();
++ 		default:		
++ 			return -E_NO_SYS;
+  	}
++ 	return result;	
+  }
+  
+ +#ifdef TEST_EPT_MAP
+ +int
+ +_export_sys_ept_map(envid_t srcenvid, void *srcva,
+ +		    envid_t guest, void* guest_pa, int perm)
+ +{
+ +	return sys_ept_map(srcenvid, srcva, guest, guest_pa, perm);
+ +}
+ +#endif
++ 
+diff --cc kern/trap.c
+index 20dea71,f21da26..0000000
+mode 100644,100644..100755
+--- a/kern/trap.c
++++ b/kern/trap.c
+@@@ -203,7 -249,21 +256,22 @@@ trap_dispatch(struct Trapframe *tf
+  
+  	// Handle keyboard and serial interrupts.
+  	// LAB 5: Your code here.
+- 
++ 	else if(tf->tf_trapno == (IRQ_OFFSET + IRQ_TIMER))
++ 	{
++ 		lapic_eoi();
+++		time_tick();
++ 		sched_yield();
++ 	}
++ 	else if(tf->tf_trapno == (IRQ_OFFSET + IRQ_KBD))
++ 	{
++ 		kbd_intr();
++ 		sched_yield();
++ 	}
++ 	else if(tf->tf_trapno == (IRQ_OFFSET + IRQ_SERIAL))
++ 	{
++ 		serial_intr();
++ 		sched_yield();
++ 	}
+  	// Unexpected trap: The user process or the kernel has a bug.
+  	print_trapframe(tf);
+  	if (tf->tf_cs == GD_KT)
+diff --cc lib/pfentry.S
+index 35c2a7c,6e83e5a..0000000
+mode 100644,100644..100755
+--- a/lib/pfentry.S
++++ b/lib/pfentry.S
+@@@ -33,52 -33,131 +33,75 @@@
+  .text
+  .globl _pgfault_upcall
+  _pgfault_upcall:
+ -	// Call the C page fault handler.
+ -	// function argument: pointer to UTF
+ -	
+ -	movq  %rsp,%rdi                // passing the function argument in rdi
+ -	movabs _pgfault_handler, %rax
+ -	call *%rax
+ -	
+ -	// Now the C page fault handler has returned and you must return
+ -	// to the trap time state.
+ -	// Push trap-time %eip onto the trap-time stack.
+ -	//
+ -	// Explanation:
+ -	//   We must prepare the trap-time stack for our eventual return to
+ -	//   re-execute the instruction that faulted.
+ -	//   Unfortunately, we can't return directly from the exception stack:
+ -	//   We can't call 'jmp', since that requires that we load the address
+ -	//   into a register, and all registers must have their trap-time
+ -	//   values after the return.
+ -	//   We can't call 'ret' from the exception stack either, since if we
+ -	//   did, %esp would have the wrong value.
+ -	//   So instead, we push the trap-time %eip onto the *trap-time* stack!
+ -	//   Below we'll switch to that stack and call 'ret', which will
+ -	//   restore %eip to its pre-fault value.
+ -	//
+ -	//   In the case of a recursive fault on the exception stack,
+ -	//   note that the word we're pushing now will fit in the
+ -	//   blank word that the kernel reserved for us.
+ -	//
+ -	// Throughout the remaining code, think carefully about what
+ -	// registers are available for intermediate calculations.  You
+ -	// may find that you have to rearrange your code in non-obvious
+ -	// ways as registers become unavailable as scratch space.
+ -	//
+ -	// LAB 4: Your code here.
+ -
+ -	// Restore the trap-time registers.  After you do this, you
+ -	// can no longer modify any general-purpose registers.
+ -	// LAB 4: Your code here.
+ -
+ -	// Restore eflags from the stack.  After you do this, you can
+ -	// no longer use arithmetic operations or anything else that
+ -	// modifies eflags.
+ -	// LAB 4: Your code here.
+ -
+ -	// Switch back to the adjusted trap-time stack.
+ -	// LAB 4: Your code here.
+ -
+ -	// Return to re-execute the instruction that faulted.
+ -	// LAB 4: Your code here.
+ -
+ -
+ -	/*This code is to be removed*/
+ -
+ -	// LAB 4: Your code here.
+ -	movq 136(%rsp), %rbx  //Load RIP 
+ -	movq 152(%rsp), %rcx  //Load RSP
+ -	//Move pointer on the stack and save the RIP on trap time stack 
+ -	subq $8, %rcx          
+ -	movq %rbx, (%rcx) 
+ -	//Now update value of trap time stack rsp after pushing rip in UXSTACKTOP
+ -	movq %rcx, 152(%rsp)
+ -	
+ -	// Restore the trap-time registers.  After you do this, you
+ -	// can no longer modify any general-purpose registers.
+ -	// LAB 4: Your code here.
+ -	addq $16,%rsp
+ -	POPA_ 
+ -	// Restore eflags from the stack.  After you do this, you can
+ -	// no longer use arithmetic operations or anything else that
+ -	// modifies eflags.
+ -	// LAB 4: Your code here.
+ -	addq $8, %rsp
+ -	popfq
+ -	
+ -	// Switch back to the adjusted trap-time stack.
+ -	// LAB 4: Your code here.
+ -	popq %rsp
+ -	
+ -	// Return to re-execute the instruction that faulted.
+ -	// LAB 4: Your code here.
+ -	ret
+ -
+ -
+ -
+ -
+ -
+ -
+ -
+ -
+ -
+ -
+ -
+ -	//addq $16,%rsp /* to skip fault_va and error code (not needed) */
+ -		
+ -		/* from rsp which is pointing to fault_va which is the 8 for fault_va, 8 for error_code, 120 positions is occupied by regs, 8 for eflags and 8 for rip */
+ -		
+ -		//movq 120(%rsp), %r10 /*RIP*/
+ -	//	movq 136(%rsp), %r11 /*RSP*/
+ -		
+ -	//	subq $8, %r11  /*to push the value of the rip to timetrap rsp, subtract and then push*/
+ -	//	movq %r10, (%r11) /*transfer RIP to the trap time RSP% */
+ -	//	movq %r11, 136(%rsp)  /*Putting the RSP back in the right place*/
+ -	
+ -		// Restore the trap-time registers.  After you do this, you
+ -		// can no longer modify any general-purpose registers.
+ -		// LAB 4: Your code here.
+ -		
+ -	//	POPA_ /* already skipped the fault_va and error_code previously by adding 16, so just pop using the macro*/
+ -	
+ -		// Restore eflags from the stack.  After you do this, you can
+ -		// no longer use arithmetic operations or anything else that
+ -		// modifies eflags.
+ -		// LAB 4: Your code here.
+ -		
+ -	//	addq $8, %rsp /* go to eflags skipping rip*/
+ -	//	popfq /*pop the flags*/ 
+ -		
+ -		// Switch back to the adjusted trap-time stack.
+ -		// LAB 4: Your code here.
+ -		
+ -	//	popq %rsp /* already at the point of rsp. so just pop.*/
+ -	
+ -		// Return to re-execute the instruction that faulted.
+ -		// LAB 4: Your code here.
+ -		
+ -	//	ret
+ -
+ -	
+ +// Call the C page fault handler.
+ +// function argument: pointer to UTF
+ +
+ +movq  %rsp,%rdi                // passing the function argument in rdi
+ +movabs _pgfault_handler, %rax
+ +call *%rax
+ +
+ +// Now the C page fault handler has returned and you must return
+ +// to the trap time state.
+ +// Push trap-time %eip onto the trap-time stack.
+ +//
+ +// Explanation:
+ +//   We must prepare the trap-time stack for our eventual return to
+ +//   re-execute the instruction that faulted.
+ +//   Unfortunately, we can't return directly from the exception stack:
+ +//   We can't call 'jmp', since that requires that we load the address
+ +//   into a register, and all registers must have their trap-time
+ +//   values after the return.
+ +//   We can't call 'ret' from the exception stack either, since if we
+ +//   did, %esp would have the wrong value.
+ +//   So instead, we push the trap-time %eip onto the *trap-time* stack!
+ +//   Below we'll switch to that stack and call 'ret', which will
+ +//   restore %eip to its pre-fault value.
+ +//
+ +//   In the case of a recursive fault on the exception stack,
+ +//   note that the word we're pushing now will fit in the
+ +//   blank word that the kernel reserved for us.
+ +//
+ +// Throughout the remaining code, think carefully about what
+ +// registers are available for intermediate calculations.  You
+ +// may find that you have to rearrange your code in non-obvious
+ +// ways as registers become unavailable as scratch space.
+ +//
+++
+++
+++
+++// LAB 4: Your code here.
+++movq 136(%rsp), %rbx  //Load RIP 
+++movq 152(%rsp), %rcx  //Load RSP
+++//Move pointer on the stack and save the RIP on trap time stack 
+++subq $8, %rcx          
+++movq %rbx, (%rcx) 
+++//Now update value of trap time stack rsp after pushing rip in UXSTACKTOP
+++movq %rcx, 152(%rsp)
+++
+++// Restore the trap-time registers.  After you do this, you
+++// can no longer modify any general-purpose registers.
+++// LAB 4: Your code here.
+++addq $16,%rsp
+++POPA_ 
+++// Restore eflags from the stack.  After you do this, you can
+++// no longer use arithmetic operations or anything else that
+++// modifies eflags.
+++// LAB 4: Your code here.
+++addq $8, %rsp
+++popfq
+++
+++// Switch back to the adjusted trap-time stack.
+++// LAB 4: Your code here.
+++popq %rsp
+++
+++// Return to re-execute the instruction that faulted.
+ +// LAB 4: Your code here.
+++ret
+++
+++
+++
+++
+ +
+-     // Restore the trap-time registers.  After you do this, you
+-     // can no longer modify any general-purpose registers.
+-     // LAB 4: Your code here.
+ +
+-     // Restore eflags from the stack.  After you do this, you can
+-     // no longer use arithmetic operations or anything else that
+-     // modifies eflags.
+-     // LAB 4: Your code here.
+ +
+-     // Switch back to the adjusted trap-time stack.
+-     // LAB 4: Your code here.
+ +
+-     // Return to re-execute the instruction that faulted.
+-     // LAB 4: Your code here.
+diff --git a/.bochsrc.tmpl b/.bochsrc.tmpl
+old mode 100644
+new mode 100755
+diff --git a/.dir-locals.el b/.dir-locals.el
+old mode 100644
+new mode 100755
+diff --git a/.gdbinit.tmpl b/.gdbinit.tmpl
+old mode 100644
+new mode 100755
+diff --git a/.gitignore b/.gitignore
+old mode 100644
+new mode 100755
+diff --git a/CODING b/CODING
+old mode 100644
+new mode 100755
+diff --git a/bochs_readme b/bochs_readme
+old mode 100644
+new mode 100755
+diff --git a/boot/main.c b/boot/main.c
+old mode 100644
+new mode 100755
+diff --git a/boot/sign.pl b/boot/sign.pl
+old mode 100644
+new mode 100755
+diff --git a/challenge1.txt b/challenge1.txt
+old mode 100644
+new mode 100755
+diff --git a/challenge2.txt b/challenge2.txt
+old mode 100644
+new mode 100755
+diff --git a/challenge3.txt b/challenge3.txt
+old mode 100644
+new mode 100755
+diff --git a/challenge4.txt b/challenge4.txt
+old mode 100644
+new mode 100755
+diff --git a/challenge5.txt b/challenge5.txt
+old mode 100644
+new mode 100755
+diff --git a/challenge6.txt b/challenge6.txt
+old mode 100644
+new mode 100755
+diff --git a/conf/env.mk b/conf/env.mk
+old mode 100644
+new mode 100755
+diff --git a/conf/lab.mk b/conf/lab.mk
+old mode 100644
+new mode 100755
+diff --git a/fs/Makefrag b/fs/Makefrag
+old mode 100644
+new mode 100755
+diff --git a/fs/fs.c b/fs/fs.c
+old mode 100644
+new mode 100755
+index 0c10aab..eb357de
+--- a/fs/fs.c
++++ b/fs/fs.c
+@@ -43,6 +43,7 @@ free_block(uint32_t blockno)
+ 	if (blockno == 0)
+ 		panic("attempt to free zero block");
+ 	bitmap[blockno/32] |= 1<<(blockno%32);
++	//cprintf("free_block is freeing block # [%d]\n", blockno);
+ }
+ 
+ // Search the bitmap for a free block and allocate it.  When you
+@@ -63,15 +64,19 @@ alloc_block(void)
+ 		// LAB 5: Your code here.
+ 		//panic("alloc_block not implemented");
+ 		uint32_t blockno = 2;
++		static int blocks_allocated = 0;
+ 		for(; blockno < super->s_nblocks; blockno++)
+ 		{
+ 			if(block_is_free(blockno))
+ 			{
+-				bitmap[blockno/32] &= 0<<(blockno%32);
++				bitmap[blockno/32] &= ~(1<<(blockno%32));
+ 				flush_block((void*)bitmap);
++				//cprintf("alloc_block_retrning block # [%d]\n", blockno);
++				blocks_allocated++;
+ 				return blockno; 
+ 			}
+ 		}
++		cprintf("alloc_block_failed and retrning block # [%d]\n", blocks_allocated);
+ 		return -E_NO_DISK;
+ 	}
+ 
+@@ -151,10 +156,18 @@ file_block_walk(struct File *f, uint32_t filebno, uint32_t **ppdiskbno, bool all
+ 		// LAB 5: Your code here.
+ 		//if filebno is out of range
+ 		//panic("file_block_walk not implemented");
++		uint32_t* indirect = 0;
++		uint32_t nblock = 0;
++		int freeBlock = 0;
++
+ 		if(filebno >= NDIRECT + NINDIRECT)
+ 		{
+ 			return -E_INVAL;
+ 		}
++		nblock = f->f_size / BLKSIZE;
++		if (filebno > nblock) {
++			return -E_NOT_FOUND;
++		}		
+ 		if(filebno >= 0 && filebno < 10)
+ 		{
+ 			*ppdiskbno = (uint32_t *)(f->f_direct + filebno);
+@@ -162,19 +175,27 @@ file_block_walk(struct File *f, uint32_t filebno, uint32_t **ppdiskbno, bool all
+ 		else if(filebno >= 10)
+ 		{
+ 			filebno = filebno - 10;
++			
+ 			if(f->f_indirect != 0)
+ 			{
+-				uint32_t* indirect = (uint32_t*)diskaddr(f->f_indirect);
++			
++				//cprintf("called from file_block_walk1\n");
++				indirect = (uint32_t*)diskaddr(f->f_indirect);
+ 				*ppdiskbno = indirect + filebno;
+ 			}
+ 			else if(f->f_indirect == 0 && alloc)
+ 			{
+-				uint32_t freeBlock = -1;
+-				if((freeBlock = alloc_block()) < 0)
++				freeBlock = alloc_block();
++				
++				if(freeBlock == -E_NO_DISK)
+ 				{
++					//f->f_indirect = freeBlock;
++					fprintf(1,"returning from here with -E_NO_DISK");
+ 					return -E_NO_DISK;
+ 				}
+ 				f->f_indirect = freeBlock;
++				
++				fprintf(1,"called from file_block_walk2\n");
+ 				*ppdiskbno = (uint32_t*)diskaddr(freeBlock) + filebno;
+ 			}
+ 			else
+@@ -198,6 +219,7 @@ file_get_block(struct File *f, uint32_t filebno, char **blk)
+ {
+ 	// LAB 5: Your code here.
+ 	//panic("file_get_block not implemented");
++	//cprintf("called from file_get_walk\n");
+ 	if(filebno >= NDIRECT + NINDIRECT || !f || !blk)
+ 	{
+ 		return -E_INVAL;
+@@ -214,10 +236,16 @@ file_get_block(struct File *f, uint32_t filebno, char **blk)
+ 	else
+ 	{
+ 		uint32_t freeBlock = -1;
+-		if((freeBlock = alloc_block()) < 0)
++		freeBlock = alloc_block();
++		
++		if(freeBlock == -E_NO_DISK)
+ 		{
++			//f->f_indirect = freeBlock;
++			fprintf(1,"file get blockreturning from here with -E_NO_DISK");
+ 			return -E_NO_DISK;
+ 		}
++		
++		fprintf(1,"file get blockcalled from file_block_walk2\n");
+ 		*pdiskbno = freeBlock;
+ 		*blk = (char*)diskaddr(freeBlock);
+ 	}
+@@ -503,7 +531,7 @@ file_flush(struct File *f)
+ {
+ 	int i;
+ 	uint32_t *pdiskbno;
+-
++	//cprintf("called from file_flush\n");
+ 	for (i = 0; i < (f->f_size + BLKSIZE - 1) / BLKSIZE; i++) {
+ 		if (file_block_walk(f, i, &pdiskbno, 0) < 0 ||
+ 		    pdiskbno == NULL || *pdiskbno == 0)
+diff --git a/fs/fs.h b/fs/fs.h
+old mode 100644
+new mode 100755
+diff --git a/fs/fsformat.c b/fs/fsformat.c
+old mode 100644
+new mode 100755
+diff --git a/fs/ide.c b/fs/ide.c
+old mode 100644
+new mode 100755
+diff --git a/fs/index.html b/fs/index.html
+old mode 100644
+new mode 100755
+diff --git a/fs/lorem b/fs/lorem
+old mode 100644
+new mode 100755
+diff --git a/fs/motd b/fs/motd
+old mode 100644
+new mode 100755
+diff --git a/fs/motd_guest b/fs/motd_guest
+old mode 100644
+new mode 100755
+diff --git a/fs/newmotd b/fs/newmotd
+old mode 100644
+new mode 100755
+diff --git a/fs/robig b/fs/robig
+old mode 100644
+new mode 100755
+diff --git a/fs/script b/fs/script
+old mode 100644
+new mode 100755
+diff --git a/fs/serv.c b/fs/serv.c
+old mode 100644
+new mode 100755
+diff --git a/fs/test.c b/fs/test.c
+old mode 100644
+new mode 100755
+diff --git a/fs/testshell.key b/fs/testshell.key
+old mode 100644
+new mode 100755
+diff --git a/fs/testshell.sh b/fs/testshell.sh
+old mode 100644
+new mode 100755
+diff --git a/fs/vmx_host.c b/fs/vmx_host.c
+old mode 100644
+new mode 100755
+index fe644b1..59e2c20
+--- a/fs/vmx_host.c
++++ b/fs/vmx_host.c
+@@ -80,6 +80,7 @@ host_ipc_init()
+ 	char path_string[50];
+ 	if ((r = fd_alloc(&host_fd)) < 0)
+ 		panic("Couldn't allocate an fd!");
++	//cprintf("Umesh : host ipc init: fd is [%d] ", host_fd);
+ 	asm("vmcall":"=a"(vmdisk_number): "0"(VMX_VMCALL_GETDISKIMGNUM));
+ 	snprintf(path_string, 50, "/vmm/fs%d.img", vmdisk_number);
+ 	strcpy(host_fsipcbuf.open.req_path, path_string);
+diff --git a/grade-lab8 b/grade-lab8
+index b23ec4a..9aeb78e 100755
+--- a/grade-lab8
++++ b/grade-lab8
+@@ -17,7 +17,7 @@ timeout=30
+ preservefs=n
+ bochs_pid=
+ 
+-BOCHS_TIMEOUT=5
++BOCHS_TIMEOUT=10
+ BOCHS_OPTIONS=
+ MAKE_OPTIONS=
+ ALT_LFS="^"
+diff --git a/gradelib.py b/gradelib.py
+old mode 100644
+new mode 100755
+diff --git a/guest_boot/sign.pl b/guest_boot/sign.pl
+old mode 100644
+new mode 100755
+diff --git a/inc/args.h b/inc/args.h
+old mode 100644
+new mode 100755
+diff --git a/inc/assert.h b/inc/assert.h
+old mode 100644
+new mode 100755
+index 54bdb60..ebb64e8
+--- a/inc/assert.h
++++ b/inc/assert.h
+@@ -10,7 +10,6 @@ void _panic(const char*, int, const char*, ...) __attribute__((noreturn));
+ 
+ #define warn(...) _warn(__FILE__, __LINE__, __VA_ARGS__)
+ #define panic(...) _panic(__FILE__, __LINE__, __VA_ARGS__)
+-
+ #define assert(x)		\
+     do { if (!(x)) panic("assertion failed: %s", #x); } while (0)
+ 
+diff --git a/inc/elf.h b/inc/elf.h
+old mode 100644
+new mode 100755
+diff --git a/inc/env.h b/inc/env.h
+old mode 100644
+new mode 100755
+diff --git a/inc/ept.h b/inc/ept.h
+old mode 100644
+new mode 100755
+diff --git a/inc/error.h b/inc/error.h
+old mode 100644
+new mode 100755
+diff --git a/inc/fd.h b/inc/fd.h
+old mode 100644
+new mode 100755
+diff --git a/inc/fs.h b/inc/fs.h
+old mode 100644
+new mode 100755
+diff --git a/inc/lib.h b/inc/lib.h
+old mode 100644
+new mode 100755
+diff --git a/inc/malloc.h b/inc/malloc.h
+old mode 100644
+new mode 100755
+diff --git a/inc/memlayout.h b/inc/memlayout.h
+old mode 100644
+new mode 100755
+diff --git a/inc/mmu.h b/inc/mmu.h
+old mode 100644
+new mode 100755
+diff --git a/inc/queue.h b/inc/queue.h
+old mode 100644
+new mode 100755
+diff --git a/inc/stab.h b/inc/stab.h
+old mode 100644
+new mode 100755
+diff --git a/inc/stdarg.h b/inc/stdarg.h
+old mode 100644
+new mode 100755
+diff --git a/inc/stdio.h b/inc/stdio.h
+old mode 100644
+new mode 100755
+diff --git a/inc/string.h b/inc/string.h
+old mode 100644
+new mode 100755
+diff --git a/inc/syscall.h b/inc/syscall.h
+old mode 100644
+new mode 100755
+diff --git a/inc/trap.h b/inc/trap.h
+old mode 100644
+new mode 100755
+diff --git a/inc/types.h b/inc/types.h
+old mode 100644
+new mode 100755
+diff --git a/inc/vmx.h b/inc/vmx.h
+old mode 100644
+new mode 100755
+diff --git a/inc/x86.h b/inc/x86.h
+old mode 100644
+new mode 100755
+diff --git a/kern/bootstrap.S b/kern/bootstrap.S
+old mode 100644
+new mode 100755
+diff --git a/kern/cpu.h b/kern/cpu.h
+old mode 100644
+new mode 100755
+diff --git a/kern/dwarf.h b/kern/dwarf.h
+old mode 100644
+new mode 100755
+diff --git a/kern/dwarf_api.h b/kern/dwarf_api.h
+old mode 100644
+new mode 100755
+diff --git a/kern/dwarf_define.h b/kern/dwarf_define.h
+old mode 100644
+new mode 100755
+diff --git a/kern/dwarf_elf.h b/kern/dwarf_elf.h
+old mode 100644
+new mode 100755
+diff --git a/kern/dwarf_error.h b/kern/dwarf_error.h
+old mode 100644
+new mode 100755
+diff --git a/kern/dwarf_lineno.h b/kern/dwarf_lineno.h
+old mode 100644
+new mode 100755
+diff --git a/kern/elf_rw.c b/kern/elf_rw.c
+old mode 100644
+new mode 100755
+diff --git a/kern/env.h b/kern/env.h
+old mode 100644
+new mode 100755
+index d520109..0213eb5
+--- a/kern/env.h
++++ b/kern/env.h
+@@ -16,6 +16,7 @@ int	env_alloc(struct Env **e, envid_t parent_id);
+ void	env_free(struct Env *e);
+ void	env_create(uint8_t *binary, enum EnvType type);
+ void	env_destroy(struct Env *e);	// Does not return if e == curenv
++envid_t ipc_find_env(enum EnvType type);
+ 
+ int	envid2env(envid_t envid, struct Env **env_store, bool checkperm);
+ // The following two functions do not return
+diff --git a/kern/kclock.c b/kern/kclock.c
+old mode 100644
+new mode 100755
+diff --git a/kern/kclock.h b/kern/kclock.h
+old mode 100644
+new mode 100755
+diff --git a/kern/lapic.c b/kern/lapic.c
+old mode 100644
+new mode 100755
+diff --git a/kern/libdwarf_frame.c b/kern/libdwarf_frame.c
+old mode 100644
+new mode 100755
+diff --git a/kern/libdwarf_lineno.c b/kern/libdwarf_lineno.c
+old mode 100644
+new mode 100755
+diff --git a/kern/libdwarf_rw.c b/kern/libdwarf_rw.c
+old mode 100644
+new mode 100755
+diff --git a/kern/macro.h b/kern/macro.h
+old mode 100644
+new mode 100755
+diff --git a/kern/mpconfig.c b/kern/mpconfig.c
+old mode 100644
+new mode 100755
+diff --git a/kern/mpentry.S b/kern/mpentry.S
+old mode 100644
+new mode 100755
+diff --git a/kern/multiboot.h b/kern/multiboot.h
+old mode 100644
+new mode 100755
+diff --git a/kern/pci.c b/kern/pci.c
+old mode 100644
+new mode 100755
+diff --git a/kern/pci.h b/kern/pci.h
+old mode 100644
+new mode 100755
+diff --git a/kern/pcireg.h b/kern/pcireg.h
+old mode 100644
+new mode 100755
+diff --git a/kern/picirq.c b/kern/picirq.c
+old mode 100644
+new mode 100755
+diff --git a/kern/picirq.h b/kern/picirq.h
+old mode 100644
+new mode 100755
+diff --git a/kern/pmap.h b/kern/pmap.h
+old mode 100644
+new mode 100755
+diff --git a/kern/sched.h b/kern/sched.h
+old mode 100644
+new mode 100755
+diff --git a/kern/spinlock.c b/kern/spinlock.c
+old mode 100644
+new mode 100755
+diff --git a/kern/spinlock.h b/kern/spinlock.h
+old mode 100644
+new mode 100755
+diff --git a/kern/syscall.h b/kern/syscall.h
+old mode 100644
+new mode 100755
+diff --git a/kern/time.c b/kern/time.c
+old mode 100644
+new mode 100755
+diff --git a/kern/time.h b/kern/time.h
+old mode 100644
+new mode 100755
+diff --git a/kern/trap.h b/kern/trap.h
+old mode 100644
+new mode 100755
+diff --git a/kern/trapentry.S b/kern/trapentry.S
+old mode 100644
+new mode 100755
+diff --git a/lib/.fork.c.swp b/lib/.fork.c.swp
+old mode 100644
+new mode 100755
+diff --git a/lib/Makefrag b/lib/Makefrag
+old mode 100644
+new mode 100755
+diff --git a/lib/args.c b/lib/args.c
+old mode 100644
+new mode 100755
+diff --git a/lib/console.c b/lib/console.c
+old mode 100644
+new mode 100755
+diff --git a/lib/entry.S b/lib/entry.S
+old mode 100644
+new mode 100755
+diff --git a/lib/exit.c b/lib/exit.c
+old mode 100644
+new mode 100755
+diff --git a/lib/fd.c b/lib/fd.c
+old mode 100644
+new mode 100755
+index 81fc88d..9ce6aa0
+--- a/lib/fd.c
++++ b/lib/fd.c
+@@ -246,7 +246,7 @@ write(int fdnum, const void *buf, size_t n)
+ 	    || (r = dev_lookup(fd->fd_dev_id, &dev)) < 0)
+ 		return r;
+ 	if ((fd->fd_omode & O_ACCMODE) == O_RDONLY) {
+-		cprintf("[%08x] write %d -- bad mode\n", thisenv->env_id, fdnum);
++		//cprintf("[%08x] write %d -- bad mode\n", thisenv->env_id, fdnum);
+ 		return -E_INVAL;
+ 	}
+ 	if (debug)
+diff --git a/lib/file.c b/lib/file.c
+old mode 100644
+new mode 100755
+diff --git a/lib/fork.c b/lib/fork.c
+old mode 100644
+new mode 100755
+diff --git a/lib/fprintf.c b/lib/fprintf.c
+old mode 100644
+new mode 100755
+diff --git a/lib/ipc.c b/lib/ipc.c
+old mode 100644
+new mode 100755
+index 587512e..eccc0b6
+--- a/lib/ipc.c
++++ b/lib/ipc.c
+@@ -70,7 +70,8 @@ ipc_send(envid_t to_env, uint32_t val, void *pg, int perm)
+ 		if(-E_IPC_NOT_RECV == result)
+ 			sys_yield();
+ 	}while(-E_IPC_NOT_RECV == result);
+-	
++	if(result != 0)
++		cprintf("ipc_send result is [%d]",result);
+ 	//panic("ipc_send not implemented");
+ }
+ 
+@@ -81,16 +82,70 @@ ipc_send(envid_t to_env, uint32_t val, void *pg, int perm)
+ int32_t
+ ipc_host_recv(void *pg) {
+ 	// LAB 8: Your code here.
+-	panic("ipc_recv not implemented in VM guest");
++	uint64_t addr = (uint64_t)pg;
++	int result = 0;
++	uint64_t a1,a2,a3,a4,a5;
++	a1 = a2 = a3 = a4 = a5 = 0;
++	if(!(uvpml4e[VPML4E(addr)] & PTE_P) && (uvpde[VPDPE(addr)] & PTE_P) && (uvpd[VPD(addr)] & PTE_P) && (uvpt[PGNUM(addr)] & PTE_P))
++		if((result = sys_page_alloc(0, (void *) addr , PTE_P|PTE_W|PTE_U|PTE_SHARE)) < 0)
++	    	return result;
++	a1 = (uint64_t)PTE_ADDR(uvpt[VPN(addr)]);
++    asm volatile("vmcall\n"
++	    : "=a" (result)
++	    : "a" (VMX_VMCALL_IPCRECV),
++	      "d" (a1),
++	      "c" (a2),
++	      "b" (a3),
++	      "D" (a4),
++	      "S" (a5)
++	    : "cc", "memory");
++	if (result > 0)
++	    panic("vmcall %d returned %d (> 0) in ipc_host_send", VMX_VMCALL_IPCRECV, result);
++	return result;
++	
++	//panic("ipc_recv not implemented in VM guest");
+ }
+ 
++
+ // Access to host IPC interface through VMCALL.
+ // Should behave similarly to ipc_send, except replacing the system call with a vmcall.
+ void
+ ipc_host_send(envid_t to_env, uint32_t val, void *pg, int perm)
+ {
+ 	// LAB 8: Your code here.
+-	panic("ipc_send not implemented in VM guest");
++	
++	uint64_t addr = (uint64_t)pg;
++	int result = 0;
++	uint64_t a1,a2,a3,a4,a5;
++	a1 = a2 = a3 = a4 = a5 = 0;
++
++	if(!(uvpml4e[VPML4E(addr)] & PTE_P) && (uvpde[VPDPE(addr)] & PTE_P) && (uvpd[VPD(addr)] & PTE_P) && (uvpt[PGNUM(addr)] & PTE_P))
++		a3 = (uint64_t)PTE_ADDR(uvpt[VPN(addr)]);
++	else
++		a3 = UTOP;
++
++	cprintf("a3 is [%x]",a3);
++	
++	a1 =  to_env;
++	a2 = val;
++	a4 = perm;
++	do{
++		asm volatile("vmcall\n"
++			: "=a" (result)
++			: "a" (VMX_VMCALL_IPCSEND),
++			  "d" (a1),
++			  "c" (a2),
++			  "b" (a3),
++			  "D" (a4),
++			  "S" (a5)
++			: "cc", "memory");
++		
++		 if (result == -E_IPC_NOT_RECV)
++			sys_yield();
++	}while(result == -E_IPC_NOT_RECV);
++	
++	if(result !=0)
++	    panic("vmcall %d returned %d (> 0) in ipc_host_send", VMX_VMCALL_IPCSEND, result);
+ }
+ 
+ #endif
+diff --git a/lib/libmain.c b/lib/libmain.c
+old mode 100644
+new mode 100755
+diff --git a/lib/malloc.c b/lib/malloc.c
+old mode 100644
+new mode 100755
+diff --git a/lib/pageref.c b/lib/pageref.c
+old mode 100644
+new mode 100755
+diff --git a/lib/panic.c b/lib/panic.c
+old mode 100644
+new mode 100755
+diff --git a/lib/pgfault.c b/lib/pgfault.c
+old mode 100644
+new mode 100755
+diff --git a/lib/pipe.c b/lib/pipe.c
+old mode 100644
+new mode 100755
+diff --git a/lib/printf.c b/lib/printf.c
+old mode 100644
+new mode 100755
+diff --git a/lib/sockets.c b/lib/sockets.c
+old mode 100644
+new mode 100755
+diff --git a/lib/spawn.c b/lib/spawn.c
+old mode 100644
+new mode 100755
+diff --git a/lib/syscall.c b/lib/syscall.c
+old mode 100644
+new mode 100755
+diff --git a/lib/wait.c b/lib/wait.c
+old mode 100644
+new mode 100755
+diff --git a/mergedep.pl b/mergedep.pl
+old mode 100644
+new mode 100755
+diff --git a/os-lab5.tar.gz b/os-lab5.tar.gz
+old mode 100644
+new mode 100755
+diff --git a/slack.txt b/slack.txt
+old mode 100644
+new mode 100755
+diff --git a/user/Makefrag b/user/Makefrag
+old mode 100644
+new mode 100755
+diff --git a/user/badsegment.c b/user/badsegment.c
+old mode 100644
+new mode 100755
+diff --git a/user/breakpoint.c b/user/breakpoint.c
+old mode 100644
+new mode 100755
+diff --git a/user/buggyhello.c b/user/buggyhello.c
+old mode 100644
+new mode 100755
+diff --git a/user/buggyhello2.c b/user/buggyhello2.c
+old mode 100644
+new mode 100755
+diff --git a/user/cat.c b/user/cat.c
+old mode 100644
+new mode 100755
+diff --git a/user/divzero.c b/user/divzero.c
+old mode 100644
+new mode 100755
+diff --git a/user/dumbfork.c b/user/dumbfork.c
+old mode 100644
+new mode 100755
+diff --git a/user/echo.c b/user/echo.c
+old mode 100644
+new mode 100755
+diff --git a/user/evilhello.c b/user/evilhello.c
+old mode 100644
+new mode 100755
+diff --git a/user/fairness.c b/user/fairness.c
+old mode 100644
+new mode 100755
+diff --git a/user/faultalloc.c b/user/faultalloc.c
+old mode 100644
+new mode 100755
+diff --git a/user/faultallocbad.c b/user/faultallocbad.c
+old mode 100644
+new mode 100755
+diff --git a/user/faultbadhandler.c b/user/faultbadhandler.c
+old mode 100644
+new mode 100755
+diff --git a/user/faultdie.c b/user/faultdie.c
+old mode 100644
+new mode 100755
+diff --git a/user/faultevilhandler.c b/user/faultevilhandler.c
+old mode 100644
+new mode 100755
+diff --git a/user/faultnostack.c b/user/faultnostack.c
+old mode 100644
+new mode 100755
+diff --git a/user/faultread.c b/user/faultread.c
+old mode 100644
+new mode 100755
+diff --git a/user/faultreadkernel.c b/user/faultreadkernel.c
+old mode 100644
+new mode 100755
+diff --git a/user/faultregs.c b/user/faultregs.c
+old mode 100644
+new mode 100755
+diff --git a/user/faultwrite.c b/user/faultwrite.c
+old mode 100644
+new mode 100755
+diff --git a/user/faultwritekernel.c b/user/faultwritekernel.c
+old mode 100644
+new mode 100755
+diff --git a/user/forktree.c b/user/forktree.c
+old mode 100644
+new mode 100755
+diff --git a/user/hello.c b/user/hello.c
+old mode 100644
+new mode 100755
+diff --git a/user/icode.c b/user/icode.c
+old mode 100644
+new mode 100755
+diff --git a/user/idle.c b/user/idle.c
+old mode 100644
+new mode 100755
+diff --git a/user/init.c b/user/init.c
+old mode 100644
+new mode 100755
+diff --git a/user/initsh.c b/user/initsh.c
+old mode 100644
+new mode 100755
+diff --git a/user/ls.c b/user/ls.c
+old mode 100644
+new mode 100755
+diff --git a/user/lsfd.c b/user/lsfd.c
+old mode 100644
+new mode 100755
+diff --git a/user/num.c b/user/num.c
+old mode 100644
+new mode 100755
+diff --git a/user/pingpong.c b/user/pingpong.c
+old mode 100644
+new mode 100755
+diff --git a/user/pingpongs.c b/user/pingpongs.c
+old mode 100644
+new mode 100755
+diff --git a/user/primes.c b/user/primes.c
+old mode 100644
+new mode 100755
+diff --git a/user/primespipe.c b/user/primespipe.c
+old mode 100644
+new mode 100755
+diff --git a/user/sendpage.c b/user/sendpage.c
+old mode 100644
+new mode 100755
+diff --git a/user/sh.c b/user/sh.c
+old mode 100644
+new mode 100755
+diff --git a/user/softint.c b/user/softint.c
+old mode 100644
+new mode 100755
+diff --git a/user/spawnhello.c b/user/spawnhello.c
+old mode 100644
+new mode 100755
+diff --git a/user/spawninit.c b/user/spawninit.c
+old mode 100644
+new mode 100755
+diff --git a/user/spin.c b/user/spin.c
+old mode 100644
+new mode 100755
+diff --git a/user/stresssched.c b/user/stresssched.c
+old mode 100644
+new mode 100755
+diff --git a/user/testbss.c b/user/testbss.c
+old mode 100644
+new mode 100755
+diff --git a/user/testfdsharing.c b/user/testfdsharing.c
+old mode 100644
+new mode 100755
+diff --git a/user/testfile.c b/user/testfile.c
+old mode 100644
+new mode 100755
+diff --git a/user/testfilero.c b/user/testfilero.c
+old mode 100644
+new mode 100755
+diff --git a/user/testkbd.c b/user/testkbd.c
+old mode 100644
+new mode 100755
+diff --git a/user/testmalloc.c b/user/testmalloc.c
+old mode 100644
+new mode 100755
+diff --git a/user/testpipe.c b/user/testpipe.c
+old mode 100644
+new mode 100755
+diff --git a/user/testpiperace.c b/user/testpiperace.c
+old mode 100644
+new mode 100755
+diff --git a/user/testpiperace2.c b/user/testpiperace2.c
+old mode 100644
+new mode 100755
+diff --git a/user/testptelibrary.c b/user/testptelibrary.c
+old mode 100644
+new mode 100755
+diff --git a/user/testpteshare.c b/user/testpteshare.c
+old mode 100644
+new mode 100755
+diff --git a/user/testshell.c b/user/testshell.c
+old mode 100644
+new mode 100755
+diff --git a/user/testtime.c b/user/testtime.c
+old mode 100644
+new mode 100755
+diff --git a/user/user.ld b/user/user.ld
+old mode 100644
+new mode 100755
+diff --git a/user/vmm.c b/user/vmm.c
+old mode 100644
+new mode 100755
+index 287e58e..232f5a0
+--- a/user/vmm.c
++++ b/user/vmm.c
+@@ -15,13 +15,98 @@
+ //
+ // Return 0 on success, <0 on failure.
+ //
++
+ static int
+ map_in_guest( envid_t guest, uintptr_t gpa, size_t memsz, 
+ 	      int fd, size_t filesz, off_t fileoffset ) {
+ 	/* Your code here */
+-	return -E_NO_SYS;
++	int i=0;
++	int result = 0;
++	int rdsize =0;
++	/*1st of all round down/up all the sizes*/
++	ROUNDDOWN(gpa,PGSIZE);
++	ROUNDDOWN(fileoffset,PGSIZE);
++	ROUNDUP(memsz,PGSIZE);
++	ROUNDUP(filesz,PGSIZE);
++
++	/*copy memsz at gpa*/
++	for (i = 0;i< memsz;i+=PGSIZE){
++
++		if((result = sys_page_alloc(0,UTEMP,__EPTE_FULL))<0)
++			return -E_NO_SYS; 	
++		//if file is smaller than memsz, dont return error, simply map empty pages. 
++		if(i<filesz){
++			if((result = seek(fd,fileoffset+i))<0)
++				return -E_NO_SYS; 
++			rdsize = (filesz-i > PGSIZE) ? PGSIZE:filesz-i;
++			if((result = readn(fd, UTEMP,rdsize))<0)
++				return -E_NO_SYS; 
++		}
++		//cprintf("going to call or gpa = [%x], rdsize = [%d]\n",gpa+i,rdsize);
++		if((result = sys_ept_map(0,UTEMP,guest,(void*)(gpa+i),__EPTE_FULL))<0)
++			return -E_NO_SYS; 
++		if((result = sys_page_unmap(0,UTEMP))<0)
++			return -E_NO_SYS; 
++			
++	}
++	return 0;
++//	return -E_NO_SYS;
+ 
+ } 
++static int
++copy_guest_kern_gpa( envid_t guest, char* fname ) {
++
++/* Your code here */
++int fd;
++int result = 0;
++struct PageInfo *p;
++struct Elf * elfHeader;
++struct Proghdr *ph, *eph;
++char buf[512] = {0};
++int bytesRead = 0;
++
++if(fname == NULL)
++{
++        return -E_NO_SYS;
++}
++if ((fd = open(fname, O_RDONLY)) < 0 ) {
++        cprintf("open %s for read: %e\n", fname, fd );
++        return -E_INVAL;
++}
++
++bytesRead = read(fd, buf, 512);
++if(bytesRead < 512)
++{
++        close(fd);
++        cprintf("Error in reading ELF header bytes read are %d\n", bytesRead);
++        return -E_NOT_EXEC;
++}
++elfHeader = (struct Elf *) buf;
++// is this a valid ELF?
++if (elfHeader->e_magic != ELF_MAGIC){
++        close(fd);
++        cprintf("loading ELF header Failed due to Corrupt Kernel ELF\n");
++        return -E_NOT_EXEC;
++}
++
++   ph = (struct Proghdr *) (buf + elfHeader->e_phoff);
++		eph = ph + elfHeader->e_phnum;
++
++		for (;ph < eph; ph++){
++				if(ELF_PROG_LOAD == ph->p_type){
++						if(ph->p_filesz <= ph->p_memsz){
++								if ((result = map_in_guest(guest, ph->p_pa, ph->p_memsz, fd, ph->p_filesz, ph->p_offset)) < 0) {
++										cprintf("Error mapping bootloader into the guest - %d\n.", result);
++										close(fd);
++										return -E_INVAL;
++								}
++						}
++				}
++		}
++		close(fd);
++		return 0;
++}
++
+ 
+ // Read the ELF headers of kernel file specified by fname,
+ // mapping all valid segments into guest physical memory as appropriate.
+@@ -29,12 +114,6 @@ map_in_guest( envid_t guest, uintptr_t gpa, size_t memsz,
+ // Return 0 on success, <0 on error
+ //
+ // Hint: compare with ELF parsing in env.c, and use map_in_guest for each segment.
+-static int
+-copy_guest_kern_gpa( envid_t guest, char* fname ) {
+-
+-	/* Your code here */
+-	return -E_NO_SYS;
+-}
+ 
+ void
+ umain(int argc, char **argv) {
+@@ -75,8 +154,8 @@ umain(int argc, char **argv) {
+ 	snprintf(filename_buffer, 50, "/vmm/fs%d.img", vmdisk_number);
+ 	
+ 	cprintf("Creating a new virtual HDD at /vmm/fs%d.img\n", vmdisk_number);
+-        r = copy("vmm/clean-fs.img", filename_buffer);
+-        
++        //r = copy("vmm/clean-fs.img", filename_buffer);
++        r = 0;
+         if (r < 0) {
+         	cprintf("Create new virtual HDD failed: %e\n", r);
+         	exit();
+diff --git a/user/vmmanager.c b/user/vmmanager.c
+old mode 100644
+new mode 100755
+diff --git a/user/writemotd.c b/user/writemotd.c
+old mode 100644
+new mode 100755
+diff --git a/user/yield.c b/user/yield.c
+old mode 100644
+new mode 100755
+diff --git a/vmm/Makefrag b/vmm/Makefrag
+old mode 100644
+new mode 100755
+diff --git a/vmm/ept.c b/vmm/ept.c
+old mode 100644
+new mode 100755
+index f838b9c..9e88e00
+--- a/vmm/ept.c
++++ b/vmm/ept.c
+@@ -29,7 +29,6 @@ static inline int epte_present(epte_t epte)
+ {
+ 	return (epte & __EPTE_FULL) > 0;
+ }
+-
+ // Find the final ept entry for a given guest physical address,
+ // creating any missing intermediate extended page tables if create is non-zero.
+ //
+@@ -40,16 +39,40 @@ static inline int epte_present(epte_t epte)
+ // Error values:
+ //    -E_INVAL if eptrt is NULL
+ //    -E_NO_ENT if create == 0 and the intermediate page table entries are missing.
+-//    -E_NO_MEM if allocation of intermediate page table entries fails
++//    -E_NO_MEM if allocation of intermediate page table entries fails.
+ //
+ // Hint: Set the permissions of intermediate ept entries to __EPTE_FULL.
+ //       The hardware ANDs the permissions at each level, so removing a permission
+ //       bit at the last level entry is sufficient (and the bookkeeping is much simpler).
+ static int ept_lookup_gpa(epte_t* eptrt, void *gpa, 
+ 			  int create, epte_t **epte_out) {
++	epte_t * pgTblIndexPtr = NULL;
++	struct PageInfo * page = NULL;
++
+     /* Your code here */
+-    panic("ept_lookup_gpa not implemented\n");
+-    return 0;
++
++	if(eptrt == NULL){
++			cprintf("ept_lookup_gpa : 1\n");
++			return -E_INVAL;
++	}
++	pgTblIndexPtr =  pml4e_walk(eptrt, gpa, create);
++	if(pgTblIndexPtr == NULL){
++		cprintf("ept_lookup_gpa : 2\n");
++		if(create  == 0)
++			return -E_NO_ENT;			
++		else
++			return  -E_NO_MEM;
++	}
++	
++	page = pa2page(*pgTblIndexPtr);				
++	if(epte_out)
++	{
++		*epte_out = pgTblIndexPtr;
++	}
++	return 0;
++	
++    //panic("ept_lookup_gpa not implemented\n");
++    //return 0;
+ 
+ }
+ 
+@@ -102,11 +125,47 @@ void free_guest_mem(epte_t* eptrt) {
+ // 
+ // Return 0 on success, <0 on failure.
+ //
++
+ int ept_page_insert(epte_t* eptrt, struct PageInfo* pp, void* gpa, int perm) {
+ 
+     /* Your code here */
+-    panic("ept_page_insert not implemented\n");
+-    return 0;
++
++	// Fill this function ineptrteptrt
++	epte_t * pgTblIndexPtr;
++	if(eptrt == NULL || pp == NULL)
++	{
++		cprintf("returning  here 1");
++		return -E_INVAL;
++	}
++	
++	pgTblIndexPtr =  pml4e_walk(eptrt, gpa, 1);
++	//cprintf("pgTblIndexPtr %p %x\n", pgTblIndexPtr, pgTblIndexPtr);
++	if(!pgTblIndexPtr)
++	{
++		cprintf("returning  here 2");
++		return 	-E_NO_MEM;
++	}
++	//set present bit
++	perm = perm|__EPTE_READ|__EPTE_IPAT;
++	bool present = *pgTblIndexPtr & __EPTE_READ;
++	if(present &&pa2page(PTE_ADDR(*pgTblIndexPtr)) == pp)
++	{	*pgTblIndexPtr = (page2pa(pp) | perm);
++		return 0;
++	}
++	//check and remove previous existing page
++	else if(present)
++	{	
++		page_remove(eptrt, gpa);
++	}
++
++	//add new page
++	*pgTblIndexPtr = (page2pa(pp) | perm);
++	//increment reference
++	pp->pp_ref += 1;
++
++	return 0;
++    //panic("ept_page_insert not implemented\n");
++    //return 0;
+ }
+ 
+ // Map host virtual address hva to guest physical address gpa,
+@@ -123,9 +182,26 @@ int ept_page_insert(epte_t* eptrt, struct PageInfo* pp, void* gpa, int perm) {
+ //       You should set the type to EPTE_TYPE_WB and set __EPTE_IPAT flag.
+ int ept_map_hva2gpa(epte_t* eptrt, void* hva, void* gpa, int perm, 
+         int overwrite) {
+-
++	epte_t* epte_out = NULL; 
++	int result = 0;
+     /* Your code here */
+-    panic("ept_map_hva2gpa not implemented\n");
++
++	result = ept_lookup_gpa(eptrt, gpa, 1 , &epte_out);
++	if(result < 0){
++		cprintf("ept_map_hva2gpa :  failing with result < 0\n");
++		return result;
++	}
++	else if(result  == 0){
++		if(*epte_out == '\0')	
++			*epte_out = (uint64_t)PADDR(hva)|perm;
++		else if(*epte_out != '\0' && overwrite == 0){
++			cprintf("ept_map_hva2gpa :	failing with result < 0\n");
++			return -E_INVAL;
++		}else if((*epte_out != '\0' && overwrite == 1)){
++			*epte_out = (uint64_t)PADDR(hva)|perm|__EPTE_IPAT|__EPTE_TYPE(EPTE_TYPE_WB);
++		}
++	}
++    //panic("ept_map_hva2gpa not implemented\n");
+ 
+     return 0;
+ }
+@@ -223,7 +299,7 @@ int test_ept_map(void)
+ 		cprintf("sys_ept_map finished normally.\n");
+ 		
+ 	if (pp->pp_ref != pp_ref + 1) 
+-		panic("Failed on checking pp_ref\n");
++		panic("Failed on checking pp_ref[%d]\n",pp_ref);
+ 	else
+ 		cprintf("pp_ref incremented correctly\n");		
+ 	
+diff --git a/vmm/ept.h b/vmm/ept.h
+old mode 100644
+new mode 100755
+diff --git a/vmm/jos_boot.S b/vmm/jos_boot.S
+old mode 100644
+new mode 100755
+diff --git a/vmm/vmexits.c b/vmm/vmexits.c
+old mode 100644
+new mode 100755
+index 13e0c6d..8ba7600
+--- a/vmm/vmexits.c
++++ b/vmm/vmexits.c
+@@ -213,8 +213,22 @@ bool
+ handle_cpuid(struct Trapframe *tf, struct VmxGuestInfo *ginfo)
+ {
+     /* Your code here */
+-    cprintf("Handle cpuid not implemented\n");
+-    return false;
++//    cprintf("Handle cpuid not implemented\n"); 
++
++    uint32_t rax = (uint32_t) tf->tf_regs.reg_rax;
++    uint32_t eax, ebx, ecx, edx;
++    cpuid(rax, &eax, &ebx, &ecx, &edx );
++    if (rax == 1)
++    	ecx = ecx & ~(1<<5);
++    
++    tf->tf_regs.reg_rax = (uint64_t)eax;
++    tf->tf_regs.reg_rbx = (uint64_t)ebx;
++    tf->tf_regs.reg_rcx = (uint64_t)ecx;
++    tf->tf_regs.reg_rdx = (uint64_t)edx;
++
++    tf->tf_rip += vmcs_read32(VMCS_32BIT_VMEXIT_INSTRUCTION_LENGTH);
++	    
++   return true;
+ 
+ }
+ 
+@@ -232,45 +246,125 @@ bool
+ handle_vmcall(struct Trapframe *tf, struct VmxGuestInfo *gInfo, uint64_t *eptrt)
+ {
+     bool handled = false;
++	int result = 0;;
+     multiboot_info_t mbinfo;
+     int perm, r;
+     void *gpa_pg, *hva_pg;
+-    envid_t to_env;
+     uint32_t val;
++	uint64_t length_low;
++	memory_map_t mmap_list[3];
++	struct PageInfo *pp = NULL;
++	uint64_t host_addr;
++	uint32_t instr_length =vmcs_read32(VMCS_32BIT_VMEXIT_INSTRUCTION_LENGTH); 
++	//cprintf("vmcall instr is  [%d]",tf->tf_regs.reg_rax );
+     // phys address of the multiboot map in the guest.
+     uint64_t multiboot_map_addr = 0x6000;
+     switch(tf->tf_regs.reg_rax) {
+         case VMX_VMCALL_MBMAP:
+-            // Craft a multiboot (e820) memory map for the guest.
+-	    //
+-            // Create three  memory mapping segments: 640k of low mem, the I/O hole (unusable), and 
+-	    //   high memory (phys_size - 1024k).
+-	    //
+-	    // Once the map is ready, find the kernel virtual address of the guest page (if present),
+-	    //   or allocate one and map it at the multiboot_map_addr (0x6000).
+-	    // Copy the mbinfo and memory_map_t (segment descriptions) into the guest page, and return
+-	    //   a pointer to this region in rbx (as a guest physical address).
+-	    /* Your code here */
+-	    cprintf("e820 map hypercall not implemented\n");	    
+-	    handled = false;
+-	    break;
++	            // Craft a multiboot (e820) memory map for the guest.
++		    //
++	            // Create three  memory mapping segments: 640k of low mem, the I/O hole (unusable), and 
++		    //   high memory (phys_size - 1024k).
++		    //
++		    // Once the map is ready, find the kernel virtual address of the guest page (if present),
++		    //   or allocate one and map it at the multiboot_map_addr (0x6000).
++		    // Copy the mbinfo and memory_map_t (segment descriptions) into the guest page, and return
++		    //   a pointer to this region in rbx (as a guest physical address).
++
++			//Low memory segment:
++			mmap_list[0].size = 20;
++		    mmap_list[0].base_addr_low = 0x0;
++		    mmap_list[0].base_addr_high = 0x0;
++		    mmap_list[0].length_low = IOPHYSMEM;
++		    mmap_list[0].length_high = 0x0;
++		    mmap_list[0].type = MB_TYPE_USABLE;
++			// IO Hole
++		    mmap_list[1].size = 20;
++		    mmap_list[1].base_addr_low = IOPHYSMEM;
++		    mmap_list[1].base_addr_high = 0x0;
++		    mmap_list[1].length_low = 0x60000;
++		    mmap_list[1].length_high = 0x0;
++		    mmap_list[1].type = MB_TYPE_RESERVED;
++	        // PHYSZ - 1024 K(its 1 MB size, not a page or something)  this part may have a high addressas nonzero  
++		    mmap_list[2].size = 20;
++		    mmap_list[2].base_addr_low = 0x100000;
++		    mmap_list[2].base_addr_high = 0x0;
++			length_low = gInfo->phys_sz - 0x100000;
++		    mmap_list[2].length_low = (uint32_t)((length_low <<32)>>32);
++		    mmap_list[2].length_high =(uint32_t)(length_low >> 32);
++		    mmap_list[2].type = MB_TYPE_USABLE;
++
++		    mbinfo.flags = MB_FLAG_MMAP;// the 7th bit(flag[6]) represents the mmap addr and length fields enabled
++		    mbinfo.mmap_length = sizeof(mmap_list);
++		    mbinfo.mmap_addr =  multiboot_map_addr + sizeof(multiboot_info_t);
++		    // Once the map is ready, find the kernel virtual address of the guest page (if present),
++		    //   or allocate one and map it at the multiboot_map_addr (0x6000).
++			
++	  		pp = page_alloc(ALLOC_ZERO);
++		    if ( pp == NULL)
++		    	return false;
++		    
++		    pp->pp_ref++;
++		    host_addr = (uint64_t)page2kva(pp);
++
++		    // Copy the mbinfo and memory_map_t (segment descriptions) into the guest page, and return
++		    //   a pointer to this region in rbx (as a guest physical address).
++			
++			memcpy((void *)host_addr,(void *)& mbinfo, (size_t)sizeof(multiboot_info_t)); 
++			memcpy(((void *)host_addr + sizeof(multiboot_info_t)), (void *)mmap_list,sizeof(mmap_list));
++			// yupp, overwrite it.
++			ept_map_hva2gpa((epte_t*) eptrt, (void *) host_addr, (void *)multiboot_map_addr, __EPTE_FULL, 1);	
++		    tf->tf_regs.reg_rbx = (uint64_t) multiboot_map_addr;
++		    /* Your code here */
++		    cprintf("e820 map hypercall done\n");	    
++		    handled = true;
++		    break;
+         case VMX_VMCALL_IPCSEND:
+ 	    // Issue the sys_ipc_send call to the host.
+ 	    // 
+ 	    // If the requested environment is the HOST FS, this call should
+ 	    //  do this translation.
+ 	    /* Your code here */
+-	    cprintf("IPC send hypercall not implemented\n");	    
+-	    handled = false;
+-            break;
++	    //cprintf("IPC send hypercall not implemented\n");	
++
++		/* Remember below order of register similar to syscall.we will send in this order in IPC from guest as well.
++		asm volatile("int %1\n"
++				 : "=a" (ret)
++				 : "i" (T_SYSCALL),
++				   "a" (num),
++				   "d" (a1),
++				   "c" (a2),
++				   "b" (a3),
++				   "D" (a4),
++				   "S" (a5)
++				 : "cc", "memory");
+ 
++		*/
++	    {
++	    struct Env  * env_store = NULL;
++		envid_t envId = tf->tf_regs.reg_rdx;
++		envid2env(envId,&env_store,0);
++		cprintf("sys ipc try send : [%d]",result);
++		if((env_store)&&(env_store->env_type ==ENV_TYPE_FS) &&(curenv->env_type == ENV_TYPE_GUEST)){
++			result = syscall(SYS_ipc_try_send,(uint64_t) envId, (uint64_t)tf->tf_regs.reg_rcx,
++									(uint64_t)tf->tf_regs.reg_rbx, (uint64_t)tf->tf_regs.reg_rdi,0);
++		}
++		tf->tf_regs.reg_rax = result;
++		cprintf("sys ipc try send : [%d]",result);
++	    handled = true;
++            break;
++	    }
+         case VMX_VMCALL_IPCRECV:
+ 	    // Issue the sys_ipc_recv call for the guest.
+ 	    // NB: because recv can call schedule, clobbering the VMCS, 
+ 	    // you should go ahead and increment rip before this call.
+ 	    /* Your code here */
+-	    cprintf("IPC recv hypercall not implemented\n");	    
+-            handled = false;
++	   	   // cprintf("IPC recv hypercall not implemented\n");	
++
++			tf->tf_rip +=instr_length;
++	   	    tf->tf_regs.reg_rax = syscall(SYS_ipc_recv, (uint64_t)tf->tf_regs.reg_rdx,0,0,0,0);
++			cprintf("sys ipc try recv : [%d]",tf->tf_regs.reg_rax);
++            handled = true;
+             break;
+         case VMX_VMCALL_LAPICEOI:
+         	lapic_eoi();
+@@ -294,6 +388,7 @@ handle_vmcall(struct Trapframe *tf, struct VmxGuestInfo *gInfo, uint64_t *eptrt)
+ 	     * Hint: The TA solution does not hard-code the length of the vmcall instruction.
+ 	     */
+ 	    /* Your code here */
++		tf->tf_rip += instr_length;
+     }
+     return handled;
+ }
+diff --git a/vmm/vmexits.h b/vmm/vmexits.h
+old mode 100644
+new mode 100755
+diff --git a/vmm/vmx.c b/vmm/vmx.c
+old mode 100644
+new mode 100755
+index e6b433c..c17ddaa
+--- a/vmm/vmx.c
++++ b/vmm/vmx.c
+@@ -60,8 +60,10 @@ bool vmx_sel_resume(int num) {
+ inline bool vmx_check_support() {
+     uint32_t eax, ebx, ecx, edx;
+     cpuid( 1, &eax, &ebx, &ecx, &edx );
+-    /* Your code here */ 
+-    panic ("vmx check not implemented\n");
++    /* Your code here */
++	if(BIT(ecx,5))
++		return true;
++    //panic ("vmx check not implemented\n");
+     cprintf("[VMM] VMX extension not supported.\n");
+     return false;
+ }
+@@ -81,7 +83,15 @@ inline bool vmx_check_support() {
+  */
+ inline bool vmx_check_ept() {
+     /* Your code here */
+-    panic ("ept check not implemented\n");
++	uint64_t msr1 = read_msr(IA32_VMX_PROCBASED_CTLS);
++	uint64_t msr2 = read_msr(IA32_VMX_PROCBASED_CTLS2);
++
++	if(BIT(msr1,63) && BIT(msr2,33)){
++		cprintf("ept is supported \n");
++		return true;
++	}
++	
++    //panic ("ept check not implemented\n");
+     cprintf("[VMM] EPT extension not supported.\n");
+     return false;
+ }
+@@ -400,10 +410,9 @@ void vmexit() {
+     static uint32_t host_vector;
+     // Get the reason for VMEXIT from the VMCS.
+     // Your code here.
+-
+-     //cprintf( "---VMEXIT Reason: %d---\n", exit_reason ); 
++	exit_reason = vmcs_read32(VMCS_32BIT_VMEXIT_REASON);
++    // cprintf( "---VMEXIT Reason: %d---\n", exit_reason ); 
+     /* vmcs_dump_cpu(); */
+- 
+     switch(exit_reason & EXIT_REASON_MASK) {
+     	case EXIT_REASON_EXTERNAL_INT:
+     		host_vector = vmcs_read32(VMCS_32BIT_VMEXIT_INTERRUPTION_INFO);
+@@ -450,7 +459,7 @@ void vmexit() {
+ 
+ void asm_vmrun(struct Trapframe *tf) {
+ 
+-    /* cprintf("VMRUN\n"); */
++//     cprintf("VMRUN\n"); 
+     // NOTE: Since we re-use Trapframe structure, tf.tf_err contains the value
+     // of cr2 of the guest.
+     tf->tf_ds = curenv->env_runs;
+@@ -458,12 +467,11 @@ void asm_vmrun(struct Trapframe *tf) {
+     unlock_kernel();
+     asm(
+             "push %%rdx; push %%rbp;"
+-            "push %%rcx \n\t" /* placeholder for guest rcx */
++            "push %%rcx \n\t" 
+             "push %%rcx \n\t"
+-	    /* Set the VMCS rsp to the current top of the frame. */
+-            /* Your code here */
++	  		"mov %%rsp, %%rax \n\t"
++	        "vmwrite %%rax, %%rdx \n\t"
+             "1: \n\t"
+-            /* Reload cr2 if changed */
+             "mov %c[cr2](%0), %%rax \n\t"
+             "mov %%cr2, %%rdx \n\t"
+             "cmp %%rax, %%rdx \n\t"
+@@ -480,10 +488,28 @@ void asm_vmrun(struct Trapframe *tf) {
+ 	     *       to simplify the pointer arithmetic.
+ 	     */
+ 	    /* Your code here */
++	     "cmpl $1, %c[launched](%0) \n\t"
++
+             /* Load guest general purpose registers from the trap frame.  Don't clobber flags. 
+ 	     *
+ 	     */
+ 	    /* Your code here */
++	     "mov %c[rax](%0), %%rax \n\t"
++	     "mov %c[rbx](%0), %%rbx \n\t"
++	     "mov %c[rdx](%0), %%rdx \n\t"
++   	     "mov %c[rbp](%0), %%rbp \n\t"
++	     "mov %c[rdi](%0), %%rdi \n\t"
++	     "mov %c[rsi](%0), %%rsi \n\t"
++	     "mov %c[r8](%0),  %%r8 \n\t"
++	     "mov %c[r9](%0),  %%r9 \n\t"
++	     "mov %c[r10](%0), %%r10 \n\t"
++	     "mov %c[r11](%0), %%r11 \n\t"
++	     "mov %c[r12](%0), %%r12 \n\t"
++	     "mov %c[r13](%0), %%r13 \n\t"
++	     "mov %c[r14](%0), %%r14 \n\t"
++	     "mov %c[r15](%0), %%r15 \n\t"
++	     "mov %c[rcx](%0), %%rcx \n\t"
++
+             /* Enter guest mode */
+ 	    /* Your code here:
+ 	     * 
+@@ -495,6 +521,12 @@ void asm_vmrun(struct Trapframe *tf) {
+ 	     * that you don't do any compareison that would clobber the condition code, set
+ 	     * above.
+ 	     */
++	     "jne 1f \n\t"		
++	     "vmlaunch \n\t"
++	     "jmp 2f \n\t"
++	     "1: " "vmresume \n\t"
++	     "2: "
++
+             ".Lvmx_return: "
+ 
+ 	    /* POST VM EXIT... */
+@@ -505,7 +537,28 @@ void asm_vmrun(struct Trapframe *tf) {
+ 	     * Be careful that the number of pushes (above) and pops are symmetrical.
+ 	     */
+ 	    /* Your code here */
+-            "pop  %%rbp; pop  %%rdx \n\t"
++
++	    "mov %%rax, %c[rax](%0) \n\t"
++	    "mov %%rbx, %c[rbx](%0) \n\t"
++	    "pop %c[rcx](%0) \n\t"
++	    "mov %%rdx, %c[rdx](%0) \n\t"
++	    "mov %%rbp, %c[rbp](%0) \n\t"
++	    "mov %%rdi, %c[rdi](%0) \n\t"
++	    "mov %%rsi, %c[rsi](%0) \n\t"
++	    "mov %%r8,  %c[r8](%0) \n\t"
++	    "mov %%r9,  %c[r9](%0) \n\t"
++	    "mov %%r10, %c[r10](%0) \n\t"
++	    "mov %%r11, %c[r11](%0) \n\t"
++	    "mov %%r12, %c[r12](%0) \n\t"
++	    "mov %%r13, %c[r13](%0) \n\t"
++	    "mov %%r14, %c[r14](%0) \n\t"
++	    "mov %%r15, %c[r15](%0) \n\t"
++
++	    "mov %%cr2, %%rax \n\t"
++	    "mov %%rax, %c[cr2](%0) \n\t"
++	    	    
++	    
++	    "pop  %%rbp; pop  %%rdx \n\t"
+ 
+             "setbe %c[fail](%0) \n\t"
+             : : "c"(tf), "d"((unsigned long)VMCS_HOST_RSP), 
+@@ -534,7 +587,7 @@ void asm_vmrun(struct Trapframe *tf) {
+     );
+     lock_kernel();
+     if(tf->tf_es) {
+-        cprintf("Error during VMLAUNCH/VMRESUME\n");
++        cprintf("Error during VMLAUNCH/VMRESUME [%d ]\n ",tf->tf_es);
+     } else {
+         curenv->env_tf.tf_rsp = vmcs_read64(VMCS_GUEST_RSP);
+         curenv->env_tf.tf_rip = vmcs_read64(VMCS_GUEST_RIP);
+@@ -542,6 +595,8 @@ void asm_vmrun(struct Trapframe *tf) {
+     }
+ }
+ 
++
++
+ void
+ msr_setup(struct VmxGuestInfo *ginfo) {
+     struct vmx_msr_entry *entry;
+@@ -622,7 +677,7 @@ int vmx_vmrun( struct Env *e ) {
+ 
+     vmcs_write64( VMCS_GUEST_RSP, curenv->env_tf.tf_rsp  );
+     vmcs_write64( VMCS_GUEST_RIP, curenv->env_tf.tf_rip );
+-    panic ("asm vmrun incomplete\n");
++    //panic ("asm vmrun incomplete\n");
+     asm_vmrun( &e->env_tf );    
+     return 0;
+ }
+diff --git a/vmm/vmx.h b/vmm/vmx.h
+old mode 100644
+new mode 100755
+diff --git a/vmm/vmx_asm.h b/vmm/vmx_asm.h
+old mode 100644
+new mode 100755

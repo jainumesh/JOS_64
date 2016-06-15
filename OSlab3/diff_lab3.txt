@@ -1,0 +1,656 @@
+diff --git a/.gdbinit.tmpl b/.gdbinit.tmpl
+index deee1d0..f167a12 100644
+--- a/.gdbinit.tmpl
++++ b/.gdbinit.tmpl
+@@ -44,5 +44,5 @@ commands
+     set $amd64 = 0
+     continue
+   end
+-  si
++  si 1000
+ end
+diff --git a/grade-lab3 b/grade-lab3
+index 3066a57..624cb9b 100755
+--- a/grade-lab3
++++ b/grade-lab3
+@@ -4,7 +4,6 @@ from gradelib import *
+ 
+ r = Runner(save("jos.out"),
+            stop_breakpoint("readline"))
+-
+ @test(10)
+ def test_divzero():
+     r.user_test("divzero")
+diff --git a/gradelib.py b/gradelib.py
+index 5691bfd..c0b4d18 100644
+--- a/gradelib.py
++++ b/gradelib.py
+@@ -476,7 +476,6 @@ Failed to shutdown QEMU.  You might need to 'killall qemu' or
+     def match(self, *args, **kwargs):
+         """Shortcut to call assert_lines_match on the most recent QEMU
+         output."""
+-
+         assert_lines_match(self.qemu.output, *args, **kwargs)
+ 
+ ##################################################################
+diff --git a/inc/trap.h b/inc/trap.h
+index 7dcbfea..aafd4d2 100644
+--- a/inc/trap.h
++++ b/inc/trap.h
+@@ -86,6 +86,28 @@ struct Trapframe {
+ } __attribute__((packed));
+ 
+ 
++void XTRPX_divzero();
++void XTRPX_Debug();
++void XTRPX_NonMaskI();
++void XTRPX_Brkpt();
++void XTRPX_OFlow();
++void XTRPX_Bound();
++void XTRPX_Illop();
++void XTRPX_Device();
++void XTRPX_DblFlt();
++void XTRPX_Tss();
++void XTRPX_Segnp();
++void XTRPX_Stack();
++void XTRPX_Gpflt();
++void XTRPX_Pgflt();
++void XTRPX_FpErr();
++void XTRPX_Align();
++void XTRPX_Mchk();
++void XTRPX_SimdErr();
++void XTRPX_Syscall();
++void XTRPX_Default();
++
++
+ #endif /* !__ASSEMBLER__ */
+ 
+ #endif /* !JOS_INC_TRAP_H */
+diff --git a/kern/env.c b/kern/env.c
+index 6c1e53a..45370c3 100644
+--- a/kern/env.c
++++ b/kern/env.c
+@@ -120,7 +120,16 @@ env_init(void)
+ {
+ 	// Set up envs array
+ 	// LAB 3: Your code here.
+-
++	size_t i;
++	struct Env* last = NULL;
++	memset(envs, 0, NENV * sizeof(struct Env));
++	for (i = 0; i < NENV; i++) {
++		if(last)
++			last->env_link = &envs[i];
++		else
++			env_free_list = &envs[i];
++		last = &envs[i];
++	}
+ 	// Per-CPU part of the initialization
+ 	env_init_percpu();
+ }
+@@ -165,9 +174,9 @@ env_setup_vm(struct Env *e)
+ 	struct PageInfo *p = NULL;
+ 
+ 	// Allocate a page for the page directory
+-	if (!(p = page_alloc(0)))
++	if (!(p = page_alloc(ALLOC_ZERO)))
+ 		return -E_NO_MEM;
+-
++	
+ 	// Now, set e->env_pml4e and initialize the page directory.
+ 	//
+ 	// Hint:
+@@ -187,6 +196,20 @@ env_setup_vm(struct Env *e)
+ 
+ 	// LAB 3: Your code here.
+ 
++	//Increment page reference here
++	p->pp_ref++;
++
++	//fill structure values
++	e->env_pml4e = (pml4e_t *)page2kva(p);
++	e->env_cr3= page2pa(p);
++
++	//copy kernel pml4e entries 
++    //for (i = PML4(UTOP); i != NPDENTRIES; i++)
++    //    e->env_pml4e[i] = boot_pml4e[i]|PTE_USER;
++	
++	e->env_pml4e[1] = boot_pml4e[1];
++	//cprintf("envpml4e[0] [%x],envpml4e[1] [%x], env cr3[%x] ,  UTOP [%x] PML4e1 [%x]",e->env_pml4e[0],e->env_pml4e[0], e->env_cr3, UTOP, PML4(UTOP));
++
+ 	// UVPT maps the env's own page table read-only.
+ 	// Permissions: kernel R, user R
+ 	e->env_pml4e[PML4(UVPT)] = e->env_cr3 | PTE_P | PTE_U;
+@@ -252,6 +275,7 @@ env_alloc(struct Env **newenv_store, envid_t parent_id)
+ 	// commit the allocation
+ 	env_free_list = e->env_link;
+ 	*newenv_store = e;
++	//cprintf("env.tf->rsp [%x], e->env_id [%d]\n", e->env_tf.tf_rsp, e->env_id);
+ 
+ 	cprintf("[%08x] new env %08x\n", curenv ? curenv->env_id : 0, e->env_id);
+ 	return 0;
+@@ -274,6 +298,29 @@ region_alloc(struct Env *e, void *va, size_t len)
+ 	//   'va' and 'len' values that are not page-aligned.
+ 	//   You should round va down, and round (va + len) up.
+ 	//   (Watch out for corner-cases!)
++	uint64_t temp = (uint64_t)va;
++	size_t lenDown = (uint64_t)va - temp;
++	int i = 0;
++	struct PageInfo *p;
++	// Address round down
++	temp =  (temp / PGSIZE) * PGSIZE;
++	// size round up
++	len += lenDown;
++	len = ((len + PGSIZE) / PGSIZE) * PGSIZE;
++	//cprintf("region_alloc entry PML4 is [%x] va [%x], memsize [%ld]\n", e->env_pml4e[0], va, len);
++
++	//Alloc pages and insert physical pages in page table
++	for(; i < len/PGSIZE; i++)
++	{	
++		p = page_alloc(ALLOC_ZERO);
++		if(p == NULL)
++		    panic("Page alloc fail\n");
++		page_insert(e->env_pml4e, p, (void*)temp, PTE_U|PTE_W);
++		temp+=PGSIZE;
++		//cprintf("region_alloc temp = [%x] , index = [%x], e->env_pml4e is [%x], PML40 is [%x]\n", temp, PML4(temp), e->env_pml4e, e->env_pml4e[0]);
++	}
++	//cprintf("region_alloc end temp = [%x] , index = [%x], e->env_pml4e is [%x], PML40 is [%x]\n", temp, PML4(temp), e->env_pml4e, e->env_pml4e[0]);
++
+ }
+ 
+ //
+@@ -334,6 +381,49 @@ load_icode(struct Env *e, uint8_t *binary)
+ 	// at virtual address USTACKTOP - PGSIZE.
+ 
+ 	// LAB 3: Your code here.
++	
++
++	struct PageInfo *p;
++	struct Elf * elfHeader;
++	struct Proghdr *ph, *eph;
++
++	if(e == NULL || binary == NULL)
++		panic("load icode Failed due to NULL input");
++
++
++	elfHeader = (struct Elf *) binary;	
++	// is this a valid ELF?
++	if (elfHeader->e_magic != ELF_MAGIC)
++		panic("load icode Failed due to Corrupt ELF");
++
++  	ph = (struct Proghdr *) (binary + elfHeader->e_phoff);
++	eph = ph + elfHeader->e_phnum;
++	lcr3(e->env_cr3);
++	for (;ph < eph; ph++){
++		if(ELF_PROG_LOAD == ph->p_type){
++			if(ph->p_filesz <= ph->p_memsz){
++				region_alloc(e, (void *)ph->p_va, ph->p_memsz);
++				size_t a = e->env_pml4e[0];
++				//cprintf("load icode Inter  e->env_pml4e is [%x], PML40 is [%x], PML41 is [%x], ph->p_filesz [%ld]\n",  e->env_pml4e, e->env_pml4e[0],e->env_pml4e[1], ph->p_filesz);
++				lcr3(e->env_cr3);
++
++				memcpy((void*)ph->p_va, binary + ph->p_offset, ph->p_filesz);
++				memset((void *)(ph->p_va + ph->p_filesz), 0, ph->p_memsz - ph->p_filesz);
++				//cprintf("load icode exit e->env_pml4e is [%x], PML40 is [%x], PML41 is [%x]\n",  e->env_pml4e, e->env_pml4e[0],e->env_pml4e[1]);
++			}
++		}
++	}
++	// call the entry point from the ELF header
++	// note: does not return!
++	
++	p = page_alloc(ALLOC_ZERO);
++	if(p == NULL)		
++		panic("load icode Failed stackpage allocation failure");
++	//cprintf("pml4e %x page %p \n", e->env_pml4e, e->env_pml4e[0]);
++	if(page_insert(e->env_pml4e , p, (void*)(USTACKTOP - PGSIZE), PTE_U|PTE_W|PTE_P) != 0)
++		panic("load icode Failed stackpage insert failure");
++	//cprintf("pml4e %x page %p\n", e->env_pml4e, e->env_pml4e[0]);
++	e->env_tf.tf_rip = (uintptr_t)(elfHeader->e_entry);
+ 	e->elf = binary;
+ }
+ 
+@@ -348,6 +438,14 @@ void
+ env_create(uint8_t *binary, enum EnvType type)
+ {
+ 	// LAB 3: Your code here.
++	struct Env *e;
++	envid_t parent_id;
++	if(env_alloc(&e, 0) != 0)
++	{
++		panic("Failed in env_alloc");
++	}
++	load_icode(e, binary);
++	e->env_type = type;
+ }
+ 
+ //
+@@ -428,7 +526,6 @@ void
+ env_destroy(struct Env *e)
+ {
+ 	env_free(e);
+-
+ 	cprintf("Destroyed the only environment - nothing more to do!\n");
+ 	while (1)
+ 		monitor(NULL);
+@@ -444,6 +541,7 @@ env_destroy(struct Env *e)
+ void
+ env_pop_tf(struct Trapframe *tf)
+ {
++	//cprintf("tf->rsp [%x]\n", tf->tf_rsp);
+ 	__asm __volatile("movq %0,%%rsp\n"
+ 			 POPA
+ 			 "movw (%%rsp),%%es\n"
+@@ -472,8 +570,7 @@ env_run(struct Env *e)
+ 	//	   3. Set its status to ENV_RUNNING,
+ 	//	   4. Update its 'env_runs' counter,
+ 	//	   5. Use lcr3() to switch to its address space.
+-	// Step 2: Use env_pop_tf() to restore the environment's
+-	//	   registers and drop into user mode in the
++	// Step 2: Use env_pop_tf() to  and drop into user mode in the
+ 	//	   environment.
+ 
+ 	// Hint: This function loads the new environment's state from
+@@ -482,7 +579,28 @@ env_run(struct Env *e)
+ 	//	e->env_tf to sensible values.
+ 
+ 	// LAB 3: Your code here.
++	//cprintf("e->env_id [%d]",e->env_id); 
++
++	if(curenv) //If this is a context switch
++	{
++		if(curenv->env_status == ENV_RUNNING)
++		{
++			curenv->env_status = ENV_RUNNABLE;	
++		}
++	}
++	//make new enviornment as current enviornment
++	curenv = e;
++	curenv->env_status = ENV_RUNNING;
++	curenv->env_runs += 1;
++	lcr3(curenv->env_cr3);
++	
++	//restore the environment's registers
++	//if(curenv->env_runs > 0)
++	{
++		env_pop_tf(&curenv->env_tf);
++	}
++	cprintf("%x %p %x %p \n", PML4(UVPT), PML4(UVPT), KADDR(PML4(UVPT)), KADDR(PML4(UVPT)));
+ 
+-	panic("env_run not yet implemented");
++	//panic("env_run not yet implemented");
+ }
+ 
+diff --git a/kern/init.c b/kern/init.c
+index 0fe9c55..dbdec2d 100755
+--- a/kern/init.c
++++ b/kern/init.c
+@@ -67,6 +67,9 @@ i386_init(void)
+ 	ENV_CREATE(TEST, ENV_TYPE_USER);
+ #else
+ 	// Touch all you want.
++	//ENV_CREATE(user_breakpoint, ENV_TYPE_USER);
++	//ENV_CREATE(user_buggyhello, ENV_TYPE_USER);
++	//ENV_CREATE(user_testbss, ENV_TYPE_USER);
+ 	ENV_CREATE(user_hello, ENV_TYPE_USER);
+ #endif // TEST*
+ 
+diff --git a/kern/monitor.c b/kern/monitor.c
+index 3d2807d..4ca068c 100755
+--- a/kern/monitor.c
++++ b/kern/monitor.c
+@@ -113,6 +113,11 @@ mon_backtrace(int argc, char **argv, struct Trapframe *tf)
+ 	cprintf("Stack backtrace:\n");
+ 	rbp = read_rbp();
+ 	read_rip(rip);
++	if(rbp == 0x0 || rip == 0x0)
++	{
++		cprintf("Not able to show backtrace");
++		return -1;
++	}
+ 	prbp = (uint64_t*)(rbp);
+ 
+ 	cprintf("    rbp %016x  rip %016x\n", prbp, rip);
+@@ -123,7 +128,7 @@ mon_backtrace(int argc, char **argv, struct Trapframe *tf)
+ 	cprintf(" args:%d", info.rip_fn_narg);
+ 	printArgList(prbp, &info);
+ 
+-	while(prbp && *(prbp) != 0x0)
++	while(prbp && *(prbp) != 0x0 && *(prbp+1) != 0x0)
+ 	{
+ 		cprintf("    rbp %016x  rip %016x\n",*(prbp),*((prbp) +1));
+ 		debuginfo_rip(*(prbp+1) ,&info);
+diff --git a/kern/pmap.c b/kern/pmap.c
+index f8787e0..e30199f 100644
+--- a/kern/pmap.c
++++ b/kern/pmap.c
+@@ -17,12 +17,15 @@ extern uint64_t pml4phys;
+ 
+ // These variables are set by i386_detect_memory()
+ size_t npages;			// Amount of physical memory (in pages)
++
+ static size_t npages_basemem;	// Amount of base memory (in pages)
+ 
+ // These variables are set in x86_vm_init()
+ pml4e_t *boot_pml4e;		// Kernel's initial page directory
+ physaddr_t boot_cr3;		// Physical address of boot time page directory
+ struct PageInfo *pages;		// Physical page state array
++extern struct Env *envs;
++
+ static struct PageInfo *page_free_list;	// Free list of physical pages
+ 
+ // --------------------------------------------------------------
+@@ -268,6 +271,8 @@ x64_vm_init(void)
+ 	//////////////////////////////////////////////////////////////////////
+ 	// Make 'envs' point to an array of size 'NENV' of 'struct Env'.
+ 	// LAB 3: Your code here.
++	
++	envs = (struct Env*)boot_alloc(NENV * sizeof(struct Env));
+ 	//////////////////////////////////////////////////////////////////////
+ 	// Now that we've allocated the initial kernel data structures, we set
+ 	// up the list of free physical pages. Once we've done so, all further
+@@ -284,7 +289,7 @@ x64_vm_init(void)
+ 	//      (ie. perm = PTE_U | PTE_P)
+ 	//    - pages itself -- kernel RW, user NONE
+ 	// Your code goes here:
+-        boot_map_region(pml4e, UPAGES, npages * sizeof(struct PageInfo), PADDR(pages), PTE_U|PTE_P);
++    boot_map_region(pml4e, UPAGES, npages * sizeof(struct PageInfo), PADDR(pages), PTE_U|PTE_P);
+ 
+ 	//////////////////////////////////////////////////////////////////////
+ 	// Map the 'envs' array read-only by the user at linear address UENVS
+@@ -293,7 +298,8 @@ x64_vm_init(void)
+ 	//    - the new image at UENVS  -- kernel R, user R
+ 	//    - envs itself -- kernel RW, user NONE
+ 	// LAB 3: Your code here.
+-
++	boot_map_region(pml4e, UENVS, NENV * sizeof(struct Env), PADDR(envs), PTE_U|PTE_P);
++	
+ 	//////////////////////////////////////////////////////////////////////
+ 	// Use the physical memory that 'bootstack' refers to as the kernel
+ 	// stack.  The kernel stack grows down from virtual address KSTACKTOP.
+@@ -326,7 +332,7 @@ x64_vm_init(void)
+ 	pde_t *pgdir = KADDR(PTE_ADDR(pdpe[0]));
+ 	lcr3(boot_cr3);
+ 
+-        check_page_free_list(1);
++    check_page_free_list(1);
+ 	check_page_alloc();
+ 	page_check();
+ 	check_page_free_list(0);
+@@ -521,6 +527,7 @@ pml4e_walk(pml4e_t *pml4e, const void *va, int create)
+ 		return NULL;
+ 	}
+ 	pml4eIndex = PML4(va);
++
+ 	if((uint64_t*)pml4e[pml4eIndex] == NULL && create == false)
+ 	{
+ 		return NULL;
+@@ -532,7 +539,9 @@ pml4e_walk(pml4e_t *pml4e, const void *va, int create)
+ 		if(!page)
+ 			return NULL;
+ 		page->pp_ref++;
++		//cprintf("pml4eIndex = [%d], pml4e[pml4eIndex] = %d", pml4eIndex, pml4e[pml4eIndex]);
+ 		pml4e[pml4eIndex] = page2pa(page) | perm;
++		//cprintf("pml4eIndex = [%d], pml4e[pml4eIndex] = %d", pml4eIndex, pml4e[pml4eIndex]);
+ 	}
+ 	//pml4e entry with last 12 bits permissions
+ 	temp = pml4e[pml4eIndex];
+@@ -660,7 +669,7 @@ static void
+ boot_map_region(pml4e_t *pml4e, uintptr_t la, size_t size, physaddr_t pa, int perm)
+ {
+         // Fill this function in
+-
++		cprintf("address received is %x\n ", la);
+         pte_t *pte_store = NULL;
+         pte_t * pgTblIndexPtr = NULL;
+ 
+@@ -722,6 +731,7 @@ page_insert(pml4e_t *pml4e, struct PageInfo *pp, void *va, int perm)
+ 	}
+ 	
+ 	pgTblIndexPtr =  pml4e_walk(pml4e, va, 1);
++	//cprintf("pgTblIndexPtr %p %x\n", pgTblIndexPtr, pgTblIndexPtr);
+ 	if(pgTblIndexPtr == NULL)
+ 	{
+ 		return 	-E_NO_MEM;
+@@ -863,8 +873,24 @@ int
+ user_mem_check(struct Env *env, const void *va, size_t len, int perm)
+ {
+ 	// LAB 3: Your code here.
++	struct PageInfo * page;
++	pte_t *pte_store;
++	void * vaT = (void*)va;
++	void *vaE;
++	vaT = ROUNDDOWN(vaT,PGSIZE);
++	vaE = ROUNDUP(vaT + len, PGSIZE);
++	for(;vaT < vaE; vaT = vaT + PGSIZE)
++	{
++		if((uintptr_t)vaT >= ULIM || !page_lookup(env->env_pml4e, vaT, &pte_store) || !pte_store || !(*pte_store & perm))
++		{
++			if(vaT < va){
++				vaT = (void*)va;
++			}
++			user_mem_check_addr = (uintptr_t)vaT;
++			return -E_FAULT;		
++		}
++	}
+ 	return 0;
+-
+ }
+ 
+ //
+diff --git a/kern/syscall.c b/kern/syscall.c
+index 677d482..9b2c594 100644
+--- a/kern/syscall.c
++++ b/kern/syscall.c
+@@ -5,6 +5,7 @@
+ #include <inc/string.h>
+ #include <inc/assert.h>
+ 
++
+ #include <kern/env.h>
+ #include <kern/pmap.h>
+ #include <kern/trap.h>
+@@ -21,8 +22,10 @@ sys_cputs(const char *s, size_t len)
+ 	// Destroy the environment if not.
+ 
+ 	// LAB 3: Your code here.
+-
++	user_mem_assert(curenv, (const void *)s, len, PTE_U|PTE_P);
++	
+ 	// Print the string supplied by the user.
++	
+ 	cprintf("%.*s", len, s);
+ }
+ 
+@@ -71,11 +74,27 @@ syscall(uint64_t syscallno, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+ 	// Return any appropriate return value.
+ 	// LAB 3: Your code here.
+ 
+-	panic("syscall not implemented");
++	//panic("syscall not implemented");
++	int64_t result = -E_NO_SYS;
+ 
+-	switch (syscallno) {
+-	default:
+-		return -E_NO_SYS;
++	switch (syscallno) 
++	{
++		case SYS_cputs:
++			sys_cputs((const char *)a1, a2);
++			result = 0;
++			break;
++		case SYS_cgetc:
++			result = sys_cgetc();
++			break;
++		case SYS_getenvid:
++			result = sys_getenvid();
++			break;
++		case SYS_env_destroy:
++			result = sys_env_destroy(a1);
++			break;	
++		default:		
++			return -E_NO_SYS;
+ 	}
++	return result;	
+ }
+ 
+diff --git a/kern/trap.c b/kern/trap.c
+index 57ac505..a0a0f3d 100644
+--- a/kern/trap.c
++++ b/kern/trap.c
+@@ -66,6 +66,27 @@ trap_init(void)
+ 	extern struct Segdesc gdt[];
+ 
+ 	// LAB 3: Your code here.
++    SETGATE(idt[T_DIVIDE], 1, GD_KT, XTRPX_divzero, 0);  
++    SETGATE(idt[T_DEBUG], 1, GD_KT, XTRPX_Debug, 0);  
++    SETGATE(idt[T_NMI], 0, GD_KT, XTRPX_NonMaskI, 0);  
++    SETGATE(idt[T_BRKPT], 1, GD_KT, XTRPX_Brkpt, 3);  
++    SETGATE(idt[T_OFLOW], 1, GD_KT, XTRPX_OFlow, 0);  
++    SETGATE(idt[T_BOUND], 1, GD_KT, XTRPX_Bound, 0);  
++    SETGATE(idt[T_ILLOP], 1, GD_KT, XTRPX_Illop, 0);  
++    SETGATE(idt[T_DEVICE], 1, GD_KT, XTRPX_Device, 0);  
++    SETGATE(idt[T_DBLFLT], 1, GD_KT, XTRPX_DblFlt, 0);  
++    SETGATE(idt[T_TSS], 1, GD_KT, XTRPX_Tss, 0);  
++    SETGATE(idt[T_SEGNP], 1, GD_KT, XTRPX_Segnp, 0);  
++    SETGATE(idt[T_STACK], 1, GD_KT, XTRPX_Stack, 0);  
++    SETGATE(idt[T_GPFLT], 1, GD_KT, XTRPX_Gpflt, 0);  
++    SETGATE(idt[T_PGFLT], 1, GD_KT, XTRPX_Pgflt, 0);  
++    SETGATE(idt[T_FPERR], 1, GD_KT, XTRPX_FpErr, 0);  
++    SETGATE(idt[T_ALIGN], 1, GD_KT, XTRPX_Align, 0);  
++    SETGATE(idt[T_MCHK], 1, GD_KT, XTRPX_Mchk, 0);  
++    SETGATE(idt[T_SIMDERR], 1, GD_KT, XTRPX_SimdErr, 0);  
++    SETGATE(idt[T_SYSCALL], 0, GD_KT, XTRPX_Syscall, 3);
++    SETGATE(idt[T_DEFAULT], 0, GD_KT, XTRPX_Default, 0);
++
+     idt_pd.pd_lim = sizeof(idt)-1;
+     idt_pd.pd_base = (uint64_t)idt;
+ 	// Per-CPU setup
+@@ -149,6 +170,27 @@ trap_dispatch(struct Trapframe *tf)
+ 	// Handle processor exceptions.
+ 	// LAB 3: Your code here.
+ 
++	if(tf->tf_trapno == T_PGFLT)
++	{
++		page_fault_handler(tf);
++	}
++	else if(tf->tf_trapno == T_BRKPT)
++	{
++		monitor(tf);
++	}
++	else if(tf->tf_trapno == T_SYSCALL)
++	{
++	#if 0
++		//AX, DX, CX, BX, DI, SI.
++		cprintf("%x %x %x %x %x %x %x", tf->tf_trapno, tf->tf_regs.reg_rax, tf->tf_regs.reg_rdx, 
++				tf->tf_regs.reg_rcx, tf->tf_regs.reg_rbx, 
++				tf->tf_regs.reg_rdi, tf->tf_regs.reg_rsi);
++	#endif
++		tf->tf_regs.reg_rax = syscall(tf->tf_regs.reg_rax, tf->tf_regs.reg_rdx, 
++				tf->tf_regs.reg_rcx, tf->tf_regs.reg_rbx, 
++				tf->tf_regs.reg_rdi, tf->tf_regs.reg_rsi);
++		return;
++	}
+ 	// Unexpected trap: The user process or the kernel has a bug.
+ 	print_trapframe(tf);
+ 	if (tf->tf_cs == GD_KT)
+@@ -208,12 +250,16 @@ page_fault_handler(struct Trapframe *tf)
+ 	fault_va = rcr2();
+ 
+ 	// Handle kernel-mode page faults.
+-
++	
+ 	// LAB 3: Your code here.
++	if((tf->tf_cs & 3) == 0)
++	{
++		panic("Page fault hapened in kernel mode");
++	}
+ 
+ 	// We've already handled kernel-mode exceptions, so if we get here,
+ 	// the page fault happened in user mode.
+-
++	
+ 	// Destroy the environment that caused the fault.
+ 	cprintf("[%08x] user fault va %08x ip %08x\n",
+ 		curenv->env_id, fault_va, tf->tf_rip);
+diff --git a/kern/trapentry.S b/kern/trapentry.S
+index 8298441..a243e6c 100644
+--- a/kern/trapentry.S
++++ b/kern/trapentry.S
+@@ -50,6 +50,26 @@
+    pusha,popa so you will find these macros handy.
+  */
+ 
++	TRAPHANDLER_NOEC(XTRPX_divzero, T_DIVIDE)
++	TRAPHANDLER_NOEC(XTRPX_Debug, T_DEBUG)
++	TRAPHANDLER_NOEC(XTRPX_NonMaskI, T_NMI)
++	TRAPHANDLER_NOEC(XTRPX_Brkpt, T_BRKPT)
++	TRAPHANDLER_NOEC(XTRPX_OFlow, T_OFLOW)
++	TRAPHANDLER_NOEC(XTRPX_Bound, T_BOUND)
++	TRAPHANDLER_NOEC(XTRPX_Illop, T_ILLOP)
++	TRAPHANDLER_NOEC(XTRPX_Device, T_DEVICE)
++	TRAPHANDLER(XTRPX_DblFlt, T_DBLFLT)
++	TRAPHANDLER(XTRPX_Tss, T_TSS)
++	TRAPHANDLER(XTRPX_Segnp, T_SEGNP)
++	TRAPHANDLER(XTRPX_Stack, T_STACK)
++	TRAPHANDLER(XTRPX_Gpflt, T_GPFLT)
++	TRAPHANDLER(XTRPX_Pgflt, T_PGFLT)
++	TRAPHANDLER_NOEC(XTRPX_FpErr, T_FPERR)
++	TRAPHANDLER(XTRPX_Align, T_ALIGN)
++	TRAPHANDLER_NOEC(XTRPX_Mchk, T_MCHK)
++	TRAPHANDLER_NOEC(XTRPX_SimdErr, T_SIMDERR)
++	TRAPHANDLER_NOEC(XTRPX_Syscall, T_SYSCALL)
++	TRAPHANDLER_NOEC(XTRPX_Default, T_DEFAULT)
+ 
+ 
+ /*
+@@ -58,4 +78,29 @@
+  * Hint: Be sure to review the x64 calling convention from lab1
+  *       for how to pass a pointer to the trapframe.
+  */
++    _alltraps:
++    	/* Since ES and DS registers can't be pushed in x86-64. So moving them to r15 first */
++		xor %r15, %r15
++		movw %ds,%r15 
++		pushq %r15
++		movw %es, %r15
++		pushq %r15
++		/* Now push all registers onto the stack */
++		PUSHA
++		/* Far pointer addressing*/
++		mov %rsp, %rdi
++		/* filling es and ds now */
++		xor %r15, %r15
++		movw $(GD_KD), %r15
++		movw %r15, %es
++		movw %r15, %ds
++		call trap
++		POPA_
++		/*Now make the stack same as we got from CPU*/
++		xor %r15, %r15
++		popq %r15
++		movw %r15, %es
++		popq %r15
++		movw %r15, %ds
++		iret 
+ 
+diff --git a/lib/libmain.c b/lib/libmain.c
+index 8a14b29..a7a62a5 100644
+--- a/lib/libmain.c
++++ b/lib/libmain.c
+@@ -13,7 +13,7 @@ libmain(int argc, char **argv)
+ {
+ 	// set thisenv to point at our Env structure in envs[].
+ 	// LAB 3: Your code here.
+-	thisenv = 0;
++	thisenv = (struct Env *)envs + ENVX(sys_getenvid());
+ 
+ 	// save the name of the program so that panic() can use it
+ 	if (argc > 0)
+@@ -21,7 +21,6 @@ libmain(int argc, char **argv)
+ 
+ 	// call user main routine
+ 	umain(argc, argv);
+-
+ 	// exit gracefully
+ 	exit();
+ }
